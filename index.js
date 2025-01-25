@@ -67,7 +67,7 @@ app.post('/ownerSignup', async (req, res) => {
             const token = jwt.sign({ ownerEmail }, JWT_SECRET, { expiresIn: '1h' });
 
             // Send email verification link
-            const verificationLink = `http://kasikotas-api.onrender.com/verify-email?token=${token}`;
+            const verificationLink = `http://kasikotas.netlify.app/views/verification/verify-email?token=${token}`;
             const mailOptions = {
               from: process.env.EMAIL_USER,
               to: ownerEmail,
