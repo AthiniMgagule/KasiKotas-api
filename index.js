@@ -29,6 +29,7 @@ const transporter = nodemailer.createTransport({
 // Signup endpoint
 app.post('/ownerSignup', async (req, res) => {
   const { ownerName, ownerContact, ownerEmail, ownerPassword } = req.body;
+  console.log('signup attempt: ', {ownerName, ownerEmail});
 
   // Validate input
   if (!ownerName || !ownerContact || !ownerEmail || !ownerPassword) {
@@ -41,11 +42,13 @@ app.post('/ownerSignup', async (req, res) => {
       'SELECT ownerEmail FROM owners WHERE ownerEmail = ?',
       [ownerEmail],
       async (err, row) => {
+        console.log('database query  result: ', {err, row});
         if (err) {
           console.error('Database error:', err.message);
           return res.status(500).send('Internal Server Error');
         }
         if (row) {
+          console.log('existing user already found: ', row);
           return res.status(409).send('Email already registered');
         }
 
@@ -67,7 +70,7 @@ app.post('/ownerSignup', async (req, res) => {
             const token = jwt.sign({ ownerEmail }, JWT_SECRET, { expiresIn: '1h' });
 
             // Send email verification link
-            const verificationLink = `http://kasikotas.netlify.app/views/verification/verify-email?token=${token}`;
+            const verificationLink = `http://localhost:8080/verify-email?token=${token}`;  //http://kasikotas/views/verification/verify-email?token=${token}
             const mailOptions = {
               from: process.env.EMAIL_USER,
               to: ownerEmail,
@@ -196,6 +199,8 @@ app.post('/createKota', (req, res) => {
       res.status(201).json({ message: 'Kota created successfully', kota_id: this.lastID });
   });
 });
+
+
 
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
