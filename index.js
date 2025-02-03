@@ -8,7 +8,7 @@ const app = express();
 const nodemailer = require('nodemailer');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 2025;
 const dbPath = path.resolve(__dirname, 'database.db');
 const db = new sqlite3.Database(dbPath);
 
@@ -26,14 +26,37 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Signup endpoint
+// owner Signup endpoint
 app.post('/ownerSignup', async (req, res) => {
   const { ownerName, ownerContact, ownerEmail, ownerPassword } = req.body;
   console.log('signup attempt: ', {ownerName, ownerEmail});
 
-  // Validate input
+  // Validate input presence
   if (!ownerName || !ownerContact || !ownerEmail || !ownerPassword) {
     return res.status(400).send('All fields are required');
+  }
+
+  //validate email format
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(ownerEmail)){
+    return res.status(400).send('please input email in correct format');
+  }
+
+  //validate password strength
+  const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{12,}$/;
+  if(!passwordRegex.test(ownerPassword)){
+    return res.status(400).send('password must be atleast 12 characters long, with at least one upper case letter, one number and one special character');
+  }
+
+  //prevent password from being the same as the name or email
+  if(ownerPassword.toLowerCase().includes(ownerName.toLowerCase()) || ownerPassword.toLowerCase().includes(ownerEmail.toLowerCase())) {
+    return res.status(400).send('Password cannot contain your name or email');
+  }
+
+  //validate phone number(only digits and length 10)
+  const phoneRegex = /^\d{10}$/;
+  if(!phoneRegex.test(ownerContact)){
+    return res.status(400).send('invalid phone number. It must contain exactly 10 digits')
   }
 
   try {
@@ -177,6 +200,42 @@ app.post('/ownerLogin', async (req, res) => {
   }
 });
 
+// Get owners endpoint
+app.get('/owners', (req, res) => {
+  db.all(`SELECT * FROM owners`, [], (err, rows) => {
+    if (err) {
+      console.error('Error retrieving owners:', err.message);
+      res.status(500).send('Internal Server Error');
+    } else {
+      res.status(200).json(rows);
+    }
+  });
+});
+
+// Endpoint to get owner by email
+app.get('/owners/:ownerEmail', (req, res) => {
+  const { ownerEmail } = req.params;
+
+  if (!ownerEmail) {
+    return res.status(400).send('Email parameter is required');
+  }
+
+  const query = 'SELECT * FROM owners WHERE ownerEmail = ?';
+  db.get(query, [ownerEmail], (err, row) => {
+    if (err) {
+      console.error('Error retrieving owner:', err.message);
+      return res.status(500).send('Internal Server Error');
+    }
+
+    if (!row) {
+      return res.status(404).send('User not found');
+    }
+
+    res.status(200).json(row);
+  });
+});
+
+//Endpoint to create a new kota
 app.post('/createKota', (req, res) => {
   const { owner_id, kota_name, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price } = req.body;
 
@@ -200,7 +259,40 @@ app.post('/createKota', (req, res) => {
   });
 });
 
+// Get kotas endpoint
+app.get('/kotaContents', (req, res) => {
+  db.all(`SELECT * FROM kota_contents`, [], (err, rows) => {
+    if (err) {
+      console.error('Error retrieving kotas:', err.message);
+      res.status(500).send('Internal Server Error');
+    } else {
+      res.status(200).json(rows);
+    }
+  });
+});
 
+// Get each kota by id endpoint
+app.get('/kotaContents/:kota_id', (req, res) => {
+  const { kota_id } = req.params;
+
+  if (!kota_id) {
+    return res.status(400).send('ID parameter is required');
+  }
+
+  const query = 'SELECT * FROM kota_contents WHERE kota_id = ?';
+  db.get(query, [kota_id], (err, row) => {
+    if (err) {
+      console.error('Error retrieving kota:', err.message);
+      return res.status(500).send('Internal Server Error');
+    }
+
+    if (!row) {
+      return res.status(404).send('kota not found');
+    }
+
+    res.status(200).json(row);
+  });
+});
 
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
