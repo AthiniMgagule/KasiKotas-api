@@ -27,43 +27,50 @@ const transporter = nodemailer.createTransport({
 });
 
 // Endpoint for owner signup
-app.post('/ownerSignup', async (req, res) => {
-  const { ownerName, ownerContact, ownerEmail, ownerPassword } = req.body;
-  console.log('signup attempt: ', {ownerName, ownerEmail});
+app.post('/signup', async (req, res) => {
+  const { name, contact, email, password, userType } = req.body;
+  console.log("API request body: ", req.body);
 
   // Validate input presence
-  if (!ownerName || !ownerContact || !ownerEmail || !ownerPassword) {
+  if (!name || !contact || !email || !password || !userType) {
     return res.status(400).send('All fields are required');
   }
 
   //validate email format
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(ownerEmail)){
+  if (!emailRegex.test(email)){
     return res.status(400).send('please input email in correct format');
   }
 
   //validate password strength
   const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{12,}$/;
-  if(!passwordRegex.test(ownerPassword)){
+  if(!passwordRegex.test(password)){
     return res.status(400).send('password must be atleast 12 characters long, with at least one upper case letter, one number and one special character');
   }
 
   //prevent password from being the same as the name or email
-  if(ownerPassword.toLowerCase().includes(ownerName.toLowerCase()) || ownerPassword.toLowerCase().includes(ownerEmail.toLowerCase())) {
+  if(password.toLowerCase().includes(name.toLowerCase()) || password.toLowerCase().includes(email.toLowerCase())) {
     return res.status(400).send('Password cannot contain your name or email');
   }
 
   //validate phone number(only digits and length 10)
   const phoneRegex = /^\d{10}$/;
-  if(!phoneRegex.test(ownerContact)){
+  if(!phoneRegex.test(contact)){
     return res.status(400).send('invalid phone number. It must contain exactly 10 digits')
+  }
+
+  //check if the userTypes are the required ones
+  const userTypes = ['owner','customer','admin'];
+
+  if(!userTypes.includes(userType)){
+    return res.status(400).send('Valid user type required');
   }
 
   try {
     // Check if the email already exists
     db.get(
-      'SELECT ownerEmail FROM owners WHERE ownerEmail = ?',
-      [ownerEmail],
+      'SELECT email FROM users WHERE email = ?',
+      [email],
       async (err, row) => {
         console.log('database query  result: ', {err, row});
         if (err) {
@@ -77,12 +84,12 @@ app.post('/ownerSignup', async (req, res) => {
 
         // Hash the password
         const saltRounds = 10;
-        const hashedPassword = await bcrypt.hash(ownerPassword, saltRounds);
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
 
         // Insert user into the database
         db.run(
-          `INSERT INTO owners (ownerName, ownerContact, ownerEmail, ownerPassword) VALUES (?, ?, ?, ?)`,
-          [ownerName, ownerContact, ownerEmail, hashedPassword],
+          `INSERT INTO users (name, contact, email, password, userType) VALUES (?, ?, ?, ?, ?)`,
+          [name, contact, email, hashedPassword, userType],
           function (err) {
             if (err) {
               console.error('Database error:', err.message);
@@ -90,16 +97,16 @@ app.post('/ownerSignup', async (req, res) => {
             }
 
             // Generate email verification token
-            const token = jwt.sign({ ownerEmail }, JWT_SECRET, { expiresIn: '1h' });
+            const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
 
             // Send email verification link
-            const verificationLink = `http://localhost:2025/owner/verify-email?token=${token}`; 
+            const verificationLink = `http:/localhost:2025/owner/verify-email?token=${token}`; 
             const mailOptions = {
               from: process.env.EMAIL_USER,
-              to: ownerEmail,
+              to: email,
               subject: 'Email Verification',
-              text: `Welcome, ${ownerName}! Please verify your email by clicking on the link: ${verificationLink}`,
-              html: `<p>Welcome, ${ownerName}!</p><p>Please verify your email by clicking on the link below:</p><a href="${verificationLink}">Verify Email</a>`,
+              text: `Welcome, ${name}! Please verify your email by clicking on the link: ${verificationLink}`,
+              html: `<p>Welcome, ${name}!</p><p>Please verify your email by clicking on the link below:</p><a href="${verificationLink}">Verify Email</a>`,
             };
 
             transporter.sendMail(mailOptions, (error, info) => {
@@ -129,10 +136,10 @@ app.get('/verify-email', (req, res) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    const { ownerEmail } = decoded;
+    const { email } = decoded;
 
     // Mark email as verified in the database
-    db.run(`UPDATE owners SET isVerified = 1 WHERE ownerEmail = ?`, [ownerEmail], function (err) {
+    db.run(`UPDATE users SET isVerified = 1 WHERE email = ?`, [email], function (err) {
       if (err) {
         console.error('Database error:', err.message);
         return res.status(500).send('Internal Server Error');
@@ -146,34 +153,36 @@ app.get('/verify-email', (req, res) => {
   }
 });
 
-//Endpoint for owner login
-app.post('/ownerLogin', async (req, res) => {
-  const { ownerEmail, ownerPassword } = req.body;
+//endpoint for password reset
+
+//Endpoint for user login
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
 
   // Validate input
-  if (!ownerEmail || !ownerPassword) {
+  if (!email || !password) {
     return res.status(400).send('All fields are required');
   }
 
   try {
     // Retrieve owner from the database
-    db.get(`SELECT * FROM owners WHERE ownerEmail = ?`, [ownerEmail], async (err, owner) => {
+    db.get(`SELECT * FROM users WHERE email = ?`, [email], async (err, user) => {
       if (err) {
         console.error('Database error:', err.message);
         return res.status(500).send('Internal Server Error');
       }
 
-      if (!owner) {
-        return res.status(404).send('Owner not found');
+      if (!user) {
+        return res.status(404).send('User not found');
       }
 
       // Check if the email is verified
-      if (!owner.isVerified) {
+      if (!user.isVerified) {
         return res.status(403).send('Please verify your email before logging in');
       }
 
       // Validate password
-      const isValidPassword = await bcrypt.compare(ownerPassword, owner.ownerPassword);
+      const isValidPassword = await bcrypt.compare(password, user.password);
 
       if (!isValidPassword) {
         return res.status(401).send('Invalid password');
@@ -181,7 +190,7 @@ app.post('/ownerLogin', async (req, res) => {
 
       // Authentication successful, generate JWT token
       const token = jwt.sign(
-        { ownerId: owner.id, ownerEmail: owner.ownerEmail },
+        { id: user.id, email: user.email },
         JWT_SECRET,
         { expiresIn: '1h' } // Token expires in 1 hour
       );
@@ -190,8 +199,8 @@ app.post('/ownerLogin', async (req, res) => {
       res.status(200).json({
         message: 'Login successful',
         token,
-        ownerName: owner.ownerName,
-        ownerEmail: owner.ownerEmail,
+        name: user.name,
+        email: user.email,
       });
     });
   } catch (err) {
@@ -200,11 +209,11 @@ app.post('/ownerLogin', async (req, res) => {
   }
 });
 
-// Endpoint to get owners
-app.get('/owners', (req, res) => {
-  db.all(`SELECT * FROM owners`, [], (err, rows) => {
+// Endpoint to get users
+app.get('/users', (req, res) => {
+  db.all(`SELECT * FROM users WHERE userType = ?`, [], (err, rows) => {
     if (err) {
-      console.error('Error retrieving owners:', err.message);
+      console.error('Error retrieving users:', err.message);
       res.status(500).send('Internal Server Error');
     } else {
       res.status(200).json(rows);
@@ -212,18 +221,18 @@ app.get('/owners', (req, res) => {
   });
 });
 
-// Endpoint to get owner by email
-app.get('/owners/:ownerEmail', (req, res) => {
-  const { ownerEmail } = req.params;
+// Endpoint to get user by email
+app.get('/users/:email', (req, res) => {
+  const { email } = req.params;
 
-  if (!ownerEmail) {
+  if (!email) {
     return res.status(400).send('Email parameter is required');
   }
 
-  const query = 'SELECT * FROM owners WHERE ownerEmail = ?';
-  db.get(query, [ownerEmail], (err, row) => {
+  const query = 'SELECT * FROM users WHERE email = ?';
+  db.get(query, [email], (err, row) => {
     if (err) {
-      console.error('Error retrieving owner:', err.message);
+      console.error('Error retrieving user:', err.message);
       return res.status(500).send('Internal Server Error');
     }
 
@@ -235,44 +244,44 @@ app.get('/owners/:ownerEmail', (req, res) => {
   });
 });
 
-//Endpoint to update owner profile
-app.put('/updateOwner/:ownerid', async (req, res) =>{
-  const {ownerid} = req.params;
-  const {ownerName, ownerContact} = req.body;
+//Endpoint to update profile
+app.put('/updateProfile/:id', async (req, res) =>{
+  const {id} = req.params;
+  const {name, contact} = req.body;
 
-  if(!ownerid || !ownerName || !ownerContact){
+  if(!id || !name || !contact){
     return res.status(400).send('all fields are required');
   }
 
   const phoneRegex = /^\d{10}$/;
-  if(!phoneRegex.test(ownerContact)){
+  if(!phoneRegex.test(contact)){
     return res.status(400).send('invalid phonenumber, it must contain 10 digits')
   }
 
   const query = `
-    UPDATE owners
-    SET ownerName = ?,
-      ownerContact = ?
-    WHERE ownerid = ?
+    UPDATE users
+    SET name = ?,
+      contact = ?
+    WHERE id = ?
   `;
 
-  db.run(query, [ownerName, ownerContact, ownerid], function(err){
+  db.run(query, [name, contact, id], function(err){
     if(err){
-      console.error('error updating owner:', err.message);
+      console.error('error updating user:', err.message);
       return res.status(500).send('internal server error');
     }
     if(this.change === 0){
-      return res.status(404).send('owner not found');
+      return res.status(404).send('user not found');
     }
-    res.status(200).json({message: 'onwer profile updated successfully'});
+    res.status(200).json({message: 'user profile updated successfully'});
   });
 });
 
 // Endpoint to reset password
 app.post('/resetPassword', async (req, res) => {
-  const { ownerEmail } = req.body;
+  const { email } = req.body;
 
-  if (!ownerEmail) {
+  if (!email) {
     return res.status(400).send('Email is required');
   }
 
@@ -283,10 +292,10 @@ app.post('/resetPassword', async (req, res) => {
 
     // Update database with reset token
     const query = `
-      UPDATE owners 
+      UPDATE users 
       SET resetToken = ?,
           resetTokenExpiry = ?
-      WHERE ownerEmail = ?
+      WHERE email = ?
     `;
 
     db.run(query, [resetToken, resetTokenExpiry, ownerEmail], function(err) {
@@ -300,10 +309,10 @@ app.post('/resetPassword', async (req, res) => {
       }
 
       // Send reset password email
-      const resetLink = `https://kasikotas.netlify.app/reset-password?token=${resetToken}`;
+      const resetLink = `http://localhost:2025/reset-password?token=${resetToken}`;
       const mailOptions = {
         from: process.env.EMAIL_USER,
-        to: ownerEmail,
+        to: email,
         subject: 'Password Reset Request',
         text: `Click the following link to reset your password: ${resetLink}`,
         html: `<p>Click the following link to reset your password:</p><a href="${resetLink}">Reset Password</a>`
@@ -343,8 +352,8 @@ app.post('/confirmReset', async (req, res) => {
 
     // Update password and clear reset token
     const query = `
-      UPDATE owners 
-      SET ownerPassword = ?,
+      UPDATE users 
+      SET password = ?,
           resetToken = NULL,
           resetTokenExpiry = NULL 
       WHERE resetToken = ? AND resetTokenExpiry > ?
@@ -370,31 +379,33 @@ app.post('/confirmReset', async (req, res) => {
 
 //Endpoint to create a new kota
 app.post('/createKota', (req, res) => {
-  const { owner_id, kota_name, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price } = req.body;
+  const { ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price } = req.body;
 
   // Validate the input
-  if (!owner_id || !kota_name || !price) {
+  if (!ownerId || !kotaName || !price) {
       return res.status(400).send('Owner ID, Kota name, and price are required');
   }
 
   // Insert the Kota customization into the database
   const query = `
-      INSERT INTO kota_contents (owner_id, kota_name, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price)
+      INSERT INTO kotContents (ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
 
-  db.run(query, [owner_id, kota_name, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price], function (err) {
+  db.run(query, [ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price], function (err) {
       if (err) {
           console.error('Error creating Kota:', err.message);
           return res.status(500).send('Internal Server Error');
       }
-      res.status(201).json({ message: 'Kota created successfully', kota_id: this.lastID });
+      res.status(201).json({ message: 'Kota created successfully', kotaId: this.lastID });
   });
 });
 
+
+//this is from where you need to continue
 // Get kotas endpoint
 app.get('/kotaContents', (req, res) => {
-  db.all(`SELECT * FROM kota_contents`, [], (err, rows) => {
+  db.all(`SELECT * FROM kotaContents`, [], (err, rows) => {
     if (err) {
       console.error('Error retrieving kotas:', err.message);
       res.status(500).send('Internal Server Error');
@@ -405,7 +416,7 @@ app.get('/kotaContents', (req, res) => {
 });
 
 // Get each kota by id endpoint
-app.get('/kotaContents/:kota_id', (req, res) => {
+app.get('/kotaContents/:kotaId', (req, res) => {
   const { kota_id } = req.params;
 
   if (!kota_id) {
@@ -428,7 +439,7 @@ app.get('/kotaContents/:kota_id', (req, res) => {
 });
 
 //Endpoint to update kota contents
-app.put('/updateKota/:kota_id', (req, res) => {
+app.put('/updateKota/:kotaId', (req, res) => {
   const kota_id = Number(req.params.kota_id); // Ensure it's a valid number
   const updates = req.body;
 
@@ -503,7 +514,7 @@ app.put('/updateKota/:kota_id', (req, res) => {
 });
 
 //Endpoint to delete kota
-app.delete('/deleteKota/:kota_id', (req,res) =>{
+app.delete('/deleteKota/:kotaId', (req,res) =>{
   const {kota_id} = req.params;
 
   if(!kota_id){
@@ -602,7 +613,7 @@ app.post('/createOrder', (req, res) => {
 });
 
 // Get all orders for an owner
-app.get('/ownerOrders/:owner_id', (req, res) => {
+app.get('/ownerOrders/:ownerId', (req, res) => {
   const { owner_id } = req.params;
   const { status } = req.query; // Optional status filter
 
@@ -636,7 +647,7 @@ app.get('/ownerOrders/:owner_id', (req, res) => {
 });
 
 // Get specific order by ID
-app.get('/orders/:order_id', (req, res) => {
+app.get('/orders/:orderId', (req, res) => {
   const { order_id } = req.params;
 
   if (!order_id) {
@@ -665,7 +676,7 @@ app.get('/orders/:order_id', (req, res) => {
 });
 
 // Update order status
-app.put('/updateOrderStatus/:order_id', (req, res) => {
+app.put('/updateOrderStatus/:orderId', (req, res) => {
   const { order_id } = req.params;
   const { order_status } = req.body;
 
@@ -709,7 +720,7 @@ app.put('/updateOrderStatus/:order_id', (req, res) => {
 });
 
 // Get all notifications for an owner
-app.get('/ownerNotifications/:owner_id', (req, res) => {
+app.get('/ownerNotifications/:ownerId', (req, res) => {
   const { owner_id } = req.params;
 
   if (!owner_id) {
@@ -732,7 +743,7 @@ app.get('/ownerNotifications/:owner_id', (req, res) => {
 });
 
 // Mark notification as read
-app.put('/markNotificationRead/:notification_id', (req, res) => {
+app.put('/markNotificationRead/:notificationId', (req, res) => {
   const { notification_id } = req.params;
 
   if (!notification_id) {
@@ -760,7 +771,7 @@ app.put('/markNotificationRead/:notification_id', (req, res) => {
 });
 
 // Delete notification
-app.delete('/deleteNotification/:notification_id', (req, res) => {
+app.delete('/deleteNotification/:notificationId', (req, res) => {
   const { notification_id } = req.params;
 
   if (!notification_id) {
