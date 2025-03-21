@@ -100,7 +100,7 @@ app.post('/signup', async (req, res) => {
             const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
 
             // Send email verification link
-            const verificationLink = `http:/localhost:2025/owner/verify-email?token=${token}`; 
+            const verificationLink = `https://kasikotas.netlify.app/owner/verify-email?token=${token}`; 
             const mailOptions = {
               from: process.env.EMAIL_USER,
               to: email,
@@ -112,8 +112,9 @@ app.post('/signup', async (req, res) => {
             transporter.sendMail(mailOptions, (error, info) => {
               if (error) {
                 console.error('Email error:', error.message);
-                return res.status(500).send('Failed to send verification email');
+                return res.status(500).json({error: error.message});
               }
+              console.log('email sent: ', info.response);
               res.status(201).json({ message: 'User created successfully. Check your email for verification.' });
             });
           }
@@ -201,6 +202,7 @@ app.post('/login', async (req, res) => {
         token,
         name: user.name,
         email: user.email,
+        id: user.id
       });
     });
   } catch (err) {
@@ -388,7 +390,7 @@ app.post('/createKota', (req, res) => {
 
   // Insert the Kota customization into the database
   const query = `
-      INSERT INTO kotContents (ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price)
+      INSERT INTO kotaContents (ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
 
@@ -401,8 +403,6 @@ app.post('/createKota', (req, res) => {
   });
 });
 
-
-//this is from where you need to continue
 // Get kotas endpoint
 app.get('/kotaContents', (req, res) => {
   db.all(`SELECT * FROM kotaContents`, [], (err, rows) => {
@@ -415,16 +415,16 @@ app.get('/kotaContents', (req, res) => {
   });
 });
 
-// Get each kota by id endpoint
-app.get('/kotaContents/:kotaId', (req, res) => {
-  const { kota_id } = req.params;
+// Get each owner's kota by id endpoint
+app.get('/kotaContents/:ownerId', (req, res) => {
+  const { ownerId } = req.params;
 
-  if (!kota_id) {
+  if (!ownerId) {
     return res.status(400).send('ID parameter is required');
   }
 
-  const query = 'SELECT * FROM kota_contents WHERE kota_id = ?';
-  db.get(query, [kota_id], (err, row) => {
+  const query = 'SELECT * FROM kotaContents WHERE ownerId = ?';
+  db.get(query, [ownerId], (err, row) => {
     if (err) {
       console.error('Error retrieving kota:', err.message);
       return res.status(500).send('Internal Server Error');
@@ -438,12 +438,14 @@ app.get('/kotaContents/:kotaId', (req, res) => {
   });
 });
 
+//continue editing from here
+
 //Endpoint to update kota contents
 app.put('/updateKota/:kotaId', (req, res) => {
-  const kota_id = Number(req.params.kota_id); // Ensure it's a valid number
+  const kotaId = Number(req.params.kotaId); // Ensure it's a valid number
   const updates = req.body;
 
-  if (!kota_id) {
+  if (!kotaId) {
     return res.status(400).json({ error: 'Kota Id is required and must be a number' });
   }
 
@@ -614,28 +616,28 @@ app.post('/createOrder', (req, res) => {
 
 // Get all orders for an owner
 app.get('/ownerOrders/:ownerId', (req, res) => {
-  const { owner_id } = req.params;
+  const { ownerId } = req.params;
   const { status } = req.query; // Optional status filter
 
-  if (!owner_id) {
+  if (!ownerId) {
     return res.status(400).send('Owner ID is required');
   }
 
   let query = `
-    SELECT o.*, k.kota_name 
+    SELECT o.*, k.kotaName 
     FROM orders o
-    LEFT JOIN kota_contents k ON o.kota_id = k.kota_id
-    WHERE o.owner_id = ?
+    LEFT JOIN kotaContents k ON o.kotaId = k.kotaId
+    WHERE o.ownerId = ?
   `;
 
-  const queryParams = [owner_id];
+  const queryParams = [ownerId];
 
   if (status) {
-    query += ' AND o.order_status = ?';
+    query += ' AND o.orderStatus = ?';
     queryParams.push(status);
   }
 
-  query += ' ORDER BY o.order_date DESC';
+  query += ' ORDER BY o.orderDate DESC';
 
   db.all(query, queryParams, (err, rows) => {
     if (err) {
