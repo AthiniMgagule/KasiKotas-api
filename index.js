@@ -698,7 +698,7 @@ app.put('/shops/:shopId', verifyToken, (req, res) => {
       return res.status(404).json({message: 'shop not found'})
     }
 
-    if(shop.ownerId != req.user.id || req.user.userType !== 'admin'){
+    if(shop.ownerId != req.user.id && req.user.userType !== 'admin'){
       return res.status(403).json({message: 'not authorized to update this shop'});
     }
   })
