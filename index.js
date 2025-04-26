@@ -11,6 +11,8 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 2025;
 const dbPath = path.resolve(__dirname, 'database.db');
 const db = new sqlite3.Database(dbPath);
+const multer = require('multer');
+const fs = require('fs');
 
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -25,6 +27,53 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS
   }
 });
+
+// Configure multer for file upload
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, 'public', 'uploads', 'shops');
+    // Ensure directory exists
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    cb(null, 'shop-' + uniqueSuffix + ext);
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: function (req, file, cb) {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'), false);
+    }
+  }
+});
+
+// Middleware to verify JWT token
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ message: 'Unauthorized, missing or invalid token' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    console.error('Token verification error:', err);
+    return res.status(401).json({ message: 'Invalid or expired token' });
+  }
+};
 
 // Endpoint for owner signup
 app.post('/signup', async (req, res) => {
@@ -213,13 +262,83 @@ app.post('/login', async (req, res) => {
 
 // Endpoint to get users
 app.get('/users', (req, res) => {
-  db.all(`SELECT * FROM users WHERE userType = ?`, [], (err, rows) => {
+  db.all(`SELECT * FROM users`, [], (err, rows) => {
     if (err) {
       console.error('Error retrieving users:', err.message);
       res.status(500).send('Internal Server Error');
     } else {
       res.status(200).json(rows);
     }
+  });
+});
+
+//endpoint to update users
+app.put('/updateUsers/:id', verifyToken, (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+
+  db.get('SELECT id FROM users WHERE id = ?', [id], (err, user) =>{
+    if(err){
+      return res.status(500).json({message:'internal server error'});
+    }
+
+    if(!user){
+      return res.status(404).json({message: 'user not found'})
+    }
+
+    if(user.id != req.user.id && req.user.userType !== 'admin'){
+      return res.status(403).json({message: 'not authorized to update this shop'});
+    }
+  })
+
+  // Build the SQL query based on provided fields
+  const allowedFields = ['name', 'contact', 'email', 'password', 'isShopRegistered'];
+  
+  const fieldsToUpdate = [];
+  const valuesToUpdate = [];
+  
+  Object.keys(updates).forEach(field => {
+    if (allowedFields.includes(field)) {
+      fieldsToUpdate.push(`${field} = ?`);
+      
+      // Handle boolean values
+      if (typeof updates[field] === 'boolean') {
+        valuesToUpdate.push(updates[field] ? 1 : 0);
+      } else {
+        valuesToUpdate.push(updates[field]);
+      }
+    }
+  });
+  
+  // If no valid fields to update
+  if (fieldsToUpdate.length === 0) {
+    return res.status(400).json({ message: 'No valid fields to update' });
+  }
+  
+  // Add shopId to values
+  valuesToUpdate.push(id);
+  
+  // Construct and execute the update query
+  const query = `UPDATE users SET ${fieldsToUpdate.join(', ')} WHERE id = ?`;
+  
+  db.run(query, valuesToUpdate, function(err) {
+    if (err) {
+      console.error('Database error:', err.message);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+    
+    if (this.changes === 0) {
+      return res.status(404).json({ message: 'user not found' });
+    }
+    
+    res.status(200).json({ 
+      message: 'user updated successfully',
+      updatedFields: Object.keys(updates).filter(field => allowedFields.includes(field))
+        .reduce((obj, key) => {
+          obj[key] = updates[key];
+          return obj;
+        }, {})
+    });
   });
 });
 
@@ -377,6 +496,298 @@ app.post('/confirmReset', async (req, res) => {
     console.error('Error in password reset confirmation:', err.message);
     res.status(500).send('Internal Server Error');
   }
+});
+
+// Endpoint for shop registration
+app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
+  const {
+    ownerId,
+    shopName,
+    shopAddress,
+    shopCity,
+    shopPostalCode,
+    shopDescription,
+    openingTime,
+    closingTime,
+    shopCategory,
+    deliveryRadius
+  } = req.body;
+
+  // Validate required fields
+  if (!ownerId || !shopName || !shopAddress || !shopCity || !shopPostalCode || 
+      !shopDescription || !openingTime || !closingTime || !shopCategory || !deliveryRadius) {
+    return res.status(400).json({ message: 'All fields are required' });
+  }
+
+  // Check if file was uploaded
+  if (!req.file) {
+    return res.status(400).json({ message: 'Shop logo is required' });
+  }
+
+  // Get the file path of the uploaded logo
+  const logoPath = `/uploads/shops/${req.file.filename}`;
+
+  // Check if owner has already registered a shop
+  db.get('SELECT * FROM shops WHERE ownerId = ?', [ownerId], (err, existingShop) => {
+    if (err) {
+      console.error('Database error:', err.message);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+
+    if (existingShop) {
+      return res.status(400).json({ message: 'You have already registered a shop' });
+    }
+
+    // Insert the shop into the database
+    const query = `
+      INSERT INTO shops (
+        ownerId,
+        shopName,
+        shopAddress,
+        shopCity,
+        shopPostalCode,
+        shopDescription,
+        openingTime,
+        closingTime,
+        shopCategory,
+        deliveryRadius,
+        logoUrl,
+        isApproved,
+        createdAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    const isApproved = 0; // Initial value, awaiting admin approval
+    const createdAt = new Date().toISOString();
+
+    db.run(
+      query,
+      [
+        ownerId,
+        shopName,
+        shopAddress,
+        shopCity,
+        shopPostalCode,
+        shopDescription,
+        openingTime,
+        closingTime,
+        shopCategory,
+        deliveryRadius,
+        logoPath,
+        isApproved,
+        createdAt
+      ],
+      function (err) {
+        if (err) {
+          console.error('Error registering shop:', err.message);
+          return res.status(500).json({ message: 'Internal server error' });
+        }
+
+        // Create a notification for the admin
+        const adminNotificationQuery = `
+          INSERT INTO notifications (
+            owner_id,
+            message,
+            notification_type,
+            created_at,
+            is_read
+          ) VALUES (?, ?, ?, ?, ?)
+        `;
+
+        // Assume admin has user ID 1 - adjust as needed for your system
+        const adminId = 1; 
+        const notificationMessage = `New shop registration from ${shopName} is awaiting approval`;
+        const notificationType = 'shop_registration';
+        const notificationTime = new Date().toISOString();
+
+        db.run(
+          adminNotificationQuery,
+          [adminId, notificationMessage, notificationType, notificationTime, 0],
+          function (err) {
+            if (err) {
+              console.error('Error creating admin notification:', err.message);
+              // Continue anyway as this is not critical
+            }
+
+            // Update the user's profile to mark shop as registered
+            db.run(
+              'UPDATE users SET isShopRegistered = 1 WHERE id = ?',
+              [ownerId],
+              function (err) {
+                if (err) {
+                  console.error('Error updating user profile:', err.message);
+                  // Continue anyway as this is not critical
+                }
+
+                res.status(201).json({
+                  message: 'Shop registration submitted successfully. Awaiting admin approval.',
+                  shopId: this.lastID
+                });
+              }
+            );
+          }
+        );
+      }
+    );
+  });
+});
+
+// Endpoint to get shops
+app.get('/shops', (req, res) => {
+  db.all(`SELECT * FROM shops`, [], (err, rows) => {
+    if (err) {
+      console.error('Error retrieving shops:', err.message);
+      res.status(500).send('Internal Server Error');
+    } else {
+      res.status(200).json(rows);
+    }
+  });
+});
+
+// Endpoint to get shop details
+app.get('/shops/:ownerId', (req, res) => {
+  const { ownerId } = req.params;
+  db.get('SELECT * FROM shops WHERE ownerId = ?', [ownerId], (err, shop) => {
+    if (err) {
+      console.error('Database error:', err.message);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+
+    if (!shop) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+
+    res.status(200).json(shop);
+  });
+});
+
+// Endpoint to update a shop
+app.put('/shops/:shopId', verifyToken, (req, res) => {
+  const { shopId } = req.params;
+  const updates = req.body;
+
+  db.get('SELECT ownerId FROM shops WHERE shopId = ?', [shopId], (err, shop) =>{
+    if(err){
+      return res.status(500).json({message:'internal server error'});
+    }
+
+    if(!shop){
+      return res.status(404).json({message: 'shop not found'})
+    }
+
+    if(shop.ownerId != req.user.id && req.user.userType !== 'admin'){
+      return res.status(403).json({message: 'not authorized to update this shop'});
+    }
+  })
+
+  // Build the SQL query based on provided fields
+  const allowedFields = ['shopName', 'shopAddress', 'shopCity', 'shopPostalCode', 
+                        'shopDescription', 'openingTime', 'closingTime', 
+                        'shopCategory', 'deliveryRadius', 'isApproved', 
+                        'rejectionReason', 'shopStatus'];
+  
+  const fieldsToUpdate = [];
+  const valuesToUpdate = [];
+  
+  Object.keys(updates).forEach(field => {
+    if (allowedFields.includes(field)) {
+      fieldsToUpdate.push(`${field} = ?`);
+      
+      // Handle boolean values
+      if (typeof updates[field] === 'boolean') {
+        valuesToUpdate.push(updates[field] ? 1 : 0);
+      } else {
+        valuesToUpdate.push(updates[field]);
+      }
+    }
+  });
+  
+  // If no valid fields to update
+  if (fieldsToUpdate.length === 0) {
+    return res.status(400).json({ message: 'No valid fields to update' });
+  }
+  
+  // Add shopId to values
+  valuesToUpdate.push(shopId);
+  
+  // Construct and execute the update query
+  const query = `UPDATE shops SET ${fieldsToUpdate.join(', ')} WHERE shopId = ?`;
+  
+  db.run(query, valuesToUpdate, function(err) {
+    if (err) {
+      console.error('Database error:', err.message);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+    
+    if (this.changes === 0) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+    
+    res.status(200).json({ 
+      message: 'Shop updated successfully',
+      updatedFields: Object.keys(updates).filter(field => allowedFields.includes(field))
+        .reduce((obj, key) => {
+          obj[key] = updates[key];
+          return obj;
+        }, {})
+    });
+  });
+});
+
+// Endpoint for admin to approve/reject a shop
+app.put('/approveShop/:shopId', verifyToken, (req, res) => {
+  const { shopId } = req.params;
+  const { isApproved, rejectionReason } = req.body;
+
+  // Check if user is admin
+  if (req.user.userType !== 'admin') {
+    return res.status(403).json({ message: 'Only admin can approve or reject shops' });
+  }
+
+  db.get('SELECT ownerId, shopName FROM shops WHERE shopId = ?', [shopId], (err, shop) => {
+    if (err) {
+      console.error('Database error:', err.message);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+
+    if (!shop) {
+      return res.status(404).json({ message: 'Shop not found' });
+    }
+
+    // Update shop approval status
+    db.run(
+      'UPDATE shops SET isApproved = ?, rejectionReason = ? WHERE shopId = ?',
+      [isApproved ? 1 : 0, rejectionReason || null, shopId],
+      function (err) {
+        if (err) {
+          console.error('Error updating shop approval:', err.message);
+          return res.status(500).json({ message: 'Internal server error' });
+        }
+
+        // Create notification for the shop owner
+        const notificationType = isApproved ? 'shop_approved' : 'shop_rejected';
+        const notificationMessage = isApproved 
+          ? `Your shop ${shop.shopName} has been approved!`
+          : `Your shop ${shop.shopName} registration was not approved. Reason: ${rejectionReason}`;
+
+        db.run(
+          `INSERT INTO notifications (owner_id, message, notification_type, created_at, is_read)
+           VALUES (?, ?, ?, ?, ?)`,
+          [shop.ownerId, notificationMessage, notificationType, new Date().toISOString(), 0],
+          function (err) {
+            if (err) {
+              console.error('Error creating owner notification:', err.message);
+              // Continue anyway as this is not critical
+            }
+
+            res.status(200).json({ 
+              message: isApproved ? 'Shop approved successfully' : 'Shop rejected successfully' 
+            });
+          }
+        );
+      }
+    );
+  });
 });
 
 //Endpoint to create a new kota
@@ -614,6 +1025,7 @@ app.post('/createOrder', (req, res) => {
   );
 });
 
+
 // Get all orders for an owner
 app.get('/ownerOrders/:ownerId', (req, res) => {
   const { ownerId } = req.params;
@@ -721,21 +1133,43 @@ app.put('/updateOrderStatus/:orderId', (req, res) => {
   );
 });
 
+//endpoint to post notification
+app.post('/notifications', verifyToken, (req, res) =>{
+  const {userId, userName, userType, title, message, notificationType, isRead, isDismissed } = req.body;
+
+  if(!userId || !userName || !userType || !title || !message || !notificationType){
+    return res.status(400).send('userId , user name, usertype, title, message and notification type are required');
+  };
+
+  const query = `
+      INSERT INTO notification (userId, userName, userType, title, message, notificationType, isRead, isDismissed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `;
+
+  db.run(query, [userId, userName, userType, title, message, notificationType, isRead, isDismissed], function (err) {
+    if (err) {
+        console.error('Error creating notification:', err.message);
+        return res.status(500).send('Internal Server Error');
+    }
+    res.status(201).json({ message: 'notification created successfully', userId: this.lastID });
+  });
+});
+
 // Get all notifications for an owner
 app.get('/ownerNotifications/:ownerId', (req, res) => {
-  const { owner_id } = req.params;
+  const { ownerId } = req.params;
 
-  if (!owner_id) {
+  if (!ownerId) {
     return res.status(400).send('Owner ID is required');
   }
 
   const query = `
     SELECT * FROM notifications 
-    WHERE owner_id = ? 
+    WHERE userId = ? 
     ORDER BY created_at DESC
   `;
 
-  db.all(query, [owner_id], (err, rows) => {
+  db.all(query, [ownerId], (err, rows) => {
     if (err) {
       console.error('Error retrieving notifications:', err.message);
       return res.status(500).send('Internal Server Error');

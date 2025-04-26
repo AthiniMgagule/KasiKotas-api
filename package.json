@@ -1,12 +1,12 @@
 {
-  "name" : "kasikotas-api",
-  "version" : "1.0.0",
-  "description" : "An API for my Kasi Kotas project",
-  "main" : "index.js",
-  "scripts" : {
-    "start" : "node index.js"
+  "name": "kasikotas-api",
+  "version": "1.0.0",
+  "description": "An API for my Kasi Kotas project",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
   },
-  "author" : "Athini Mgagule",
+  "author": "Athini Mgagule",
   "dependencies": {
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
@@ -14,6 +14,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.2",
     "nodemailer": "^6.9.16",
     "sqlite3": "^5.1.7"
   }
