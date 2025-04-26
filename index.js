@@ -689,70 +689,73 @@ app.put('/shops/:shopId', verifyToken, (req, res) => {
   const { shopId } = req.params;
   const updates = req.body;
 
-  db.get('SELECT ownerId FROM shops WHERE shopId = ?', [shopId], (err, shop) => {
+  db.get('SELECT ownerId FROM shops WHERE shopId = ?', [shopId], (err, shop) =>{
+    if(err){
+      return res.status(500).json({message:'internal server error'});
+    }
+
+    if(!shop){
+      return res.status(404).json({message: 'shop not found'})
+    }
+
+    if(shop.ownerId != req.user.id || req.user.userType !== 'admin'){
+      return res.status(403).json({message: 'not authorized to update this shop'});
+    }
+  })
+
+  // Build the SQL query based on provided fields
+  const allowedFields = ['shopName', 'shopAddress', 'shopCity', 'shopPostalCode', 
+                        'shopDescription', 'openingTime', 'closingTime', 
+                        'shopCategory', 'deliveryRadius', 'isApproved', 
+                        'rejectionReason', 'shopStatus'];
+  
+  const fieldsToUpdate = [];
+  const valuesToUpdate = [];
+  
+  Object.keys(updates).forEach(field => {
+    if (allowedFields.includes(field)) {
+      fieldsToUpdate.push(`${field} = ?`);
+      
+      // Handle boolean values
+      if (typeof updates[field] === 'boolean') {
+        valuesToUpdate.push(updates[field] ? 1 : 0);
+      } else {
+        valuesToUpdate.push(updates[field]);
+      }
+    }
+  });
+  
+  // If no valid fields to update
+  if (fieldsToUpdate.length === 0) {
+    return res.status(400).json({ message: 'No valid fields to update' });
+  }
+  
+  // Add shopId to values
+  valuesToUpdate.push(shopId);
+  
+  // Construct and execute the update query
+  const query = `UPDATE shops SET ${fieldsToUpdate.join(', ')} WHERE shopId = ?`;
+  
+  db.run(query, valuesToUpdate, function(err) {
     if (err) {
-      return res.status(500).json({ message: 'internal server error' });
+      console.error('Database error:', err.message);
+      return res.status(500).json({ message: 'Internal server error' });
     }
-
-    if (!shop) {
-      return res.status(404).json({ message: 'shop not found' });
+    
+    if (this.changes === 0) {
+      return res.status(404).json({ message: 'Shop not found' });
     }
-
-    if (shop.ownerId != req.user.id || req.user.userType !== 'admin') {
-      return res.status(403).json({ message: 'not authorized to update this shop' });
-    }
-
-    // ONLY proceed if authorized
-    const allowedFields = ['shopName', 'shopAddress', 'shopCity', 'shopPostalCode', 
-                            'shopDescription', 'openingTime', 'closingTime', 
-                            'shopCategory', 'deliveryRadius', 'isApproved', 
-                            'rejectionReason', 'shopStatus'];
-
-    const fieldsToUpdate = [];
-    const valuesToUpdate = [];
-
-    Object.keys(updates).forEach(field => {
-      if (allowedFields.includes(field)) {
-        fieldsToUpdate.push(`${field} = ?`);
-        if (typeof updates[field] === 'boolean') {
-          valuesToUpdate.push(updates[field] ? 1 : 0);
-        } else {
-          valuesToUpdate.push(updates[field]);
-        }
-      }
+    
+    res.status(200).json({ 
+      message: 'Shop updated successfully',
+      updatedFields: Object.keys(updates).filter(field => allowedFields.includes(field))
+        .reduce((obj, key) => {
+          obj[key] = updates[key];
+          return obj;
+        }, {})
     });
-
-    if (fieldsToUpdate.length === 0) {
-      return res.status(400).json({ message: 'No valid fields to update' });
-    }
-
-    valuesToUpdate.push(shopId);
-
-    const query = `UPDATE shops SET ${fieldsToUpdate.join(', ')} WHERE shopId = ?`;
-
-    db.run(query, valuesToUpdate, function (err) {
-      if (err) {
-        console.error('Database error:', err.message);
-        return res.status(500).json({ message: 'Internal server error' });
-      }
-
-      if (this.changes === 0) {
-        return res.status(404).json({ message: 'Shop not found' });
-      }
-
-      res.status(200).json({
-        message: 'Shop updated successfully',
-        updatedFields: Object.keys(updates).filter(field => allowedFields.includes(field))
-          .reduce((obj, key) => {
-            obj[key] = updates[key];
-            return obj;
-          }, {})
-      });
-    });
-
   });
 });
-
 
 // Endpoint for admin to approve/reject a shop
 app.put('/approveShop/:shopId', verifyToken, (req, res) => {
