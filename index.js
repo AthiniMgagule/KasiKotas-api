@@ -1,18 +1,21 @@
+// 📦 At the top of your file (your requires):
 require('dotenv').config();
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
-const app = express();
-const nodemailer = require('nodemailer');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const fs = require('fs'); // still used for other reasons
+const app = express();
 const PORT = process.env.PORT || 2025;
 const dbPath = path.resolve(__dirname, 'database.db');
 const db = new sqlite3.Database(dbPath);
-const multer = require('multer');
-const fs = require('fs');
 
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -28,34 +31,56 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Configure multer for file upload
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = path.join(__dirname, 'public', 'uploads', 'shops');
-    // Ensure directory exists
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, 'shop-' + uniqueSuffix + ext);
-  }
+// 📦 Cloudinary configuration:
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const upload = multer({ 
-  storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
-  fileFilter: function (req, file, cb) {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed'), false);
-    }
-  }
+// 📦 Updated multer setup using CloudinaryStorage:
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'shops', // All uploads will go into "shops" folder in Cloudinary
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif'],
+    transformation: [
+      { width: 500, height: 500, crop: 'limit', quality: 'auto', fetch_format: 'auto' }
+    ],
+  },
 });
+
+const upload = multer({ storage: storage });
+
+
+// // Configure multer for file upload
+// const storage = multer.diskStorage({
+//   destination: function (req, file, cb) {
+//     const uploadDir = path.join(__dirname, 'public', 'uploads', 'shops');
+//     // Ensure directory exists
+//     if (!fs.existsSync(uploadDir)) {
+//       fs.mkdirSync(uploadDir, { recursive: true });
+//     }
+//     cb(null, uploadDir);
+//   },
+//   filename: function (req, file, cb) {
+//     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+//     const ext = path.extname(file.originalname);
+//     cb(null, 'shop-' + uniqueSuffix + ext);
+//   }
+// });
+
+// const upload = multer({ 
+//   storage: storage,
+//   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+//   fileFilter: function (req, file, cb) {
+//     if (file.mimetype.startsWith('image/')) {
+//       cb(null, true);
+//     } else {
+//       cb(new Error('Only image files are allowed'), false);
+//     }
+//   }
+// });
 
 // Middleware to verify JWT token
 const verifyToken = (req, res, next) => {
@@ -524,8 +549,8 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
     return res.status(400).json({ message: 'Shop logo is required' });
   }
 
-  // Get the file path of the uploaded logo
-  const logoPath = `/uploads/shops/${req.file.filename}`;
+  // 📦 Use the Cloudinary URL for logo
+  const logoPath = req.file.path;
 
   // Check if owner has already registered a shop
   db.get('SELECT * FROM shops WHERE ownerId = ?', [ownerId], (err, existingShop) => {
@@ -573,7 +598,7 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
         closingTime,
         shopCategory,
         deliveryRadius,
-        logoPath,
+        logoPath, // save the Cloudinary URL
         isApproved,
         createdAt
       ],
@@ -594,7 +619,6 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
           ) VALUES (?, ?, ?, ?, ?)
         `;
 
-        // Assume admin has user ID 1 - adjust as needed for your system
         const adminId = 1; 
         const notificationMessage = `New shop registration from ${shopName} is awaiting approval`;
         const notificationType = 'shop_registration';
@@ -606,7 +630,6 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
           function (err) {
             if (err) {
               console.error('Error creating admin notification:', err.message);
-              // Continue anyway as this is not critical
             }
 
             // Update the user's profile to mark shop as registered
@@ -616,7 +639,6 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
               function (err) {
                 if (err) {
                   console.error('Error updating user profile:', err.message);
-                  // Continue anyway as this is not critical
                 }
 
                 res.status(201).json({
@@ -631,6 +653,7 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
     );
   });
 });
+
 
 // Endpoint to get shops
 app.get('/shops', (req, res) => {
