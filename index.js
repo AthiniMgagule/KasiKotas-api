@@ -1,8 +1,7 @@
-// 📦 At the top of your file (your requires):
 require('dotenv').config();
+console.log('> DATABASE_URL =', process.env.DATABASE_URL);
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+const { Pool } = require('pg'); // Changed: Using PostgreSQL driver
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -12,10 +11,15 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const fs = require('fs'); // still used for other reasons
+const path = require('path'); // Still needed for path operations
 const app = express();
 const PORT = process.env.PORT || 2025;
-const dbPath = path.resolve(__dirname, 'database.db');
-const db = new sqlite3.Database(dbPath);
+
+// Create a PostgreSQL connection pool
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false } // Required for some PostgreSQL hosting services like Heroku or Neon
+});
 
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -24,8 +28,8 @@ app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 const transporter = nodemailer.createTransport({
-  service : 'gmail',
-  auth : {
+  service: 'gmail',
+  auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
   }
@@ -52,36 +56,6 @@ const storage = new CloudinaryStorage({
 
 const upload = multer({ storage: storage });
 
-
-// // Configure multer for file upload
-// const storage = multer.diskStorage({
-//   destination: function (req, file, cb) {
-//     const uploadDir = path.join(__dirname, 'public', 'uploads', 'shops');
-//     // Ensure directory exists
-//     if (!fs.existsSync(uploadDir)) {
-//       fs.mkdirSync(uploadDir, { recursive: true });
-//     }
-//     cb(null, uploadDir);
-//   },
-//   filename: function (req, file, cb) {
-//     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-//     const ext = path.extname(file.originalname);
-//     cb(null, 'shop-' + uniqueSuffix + ext);
-//   }
-// });
-
-// const upload = multer({ 
-//   storage: storage,
-//   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
-//   fileFilter: function (req, file, cb) {
-//     if (file.mimetype.startsWith('image/')) {
-//       cb(null, true);
-//     } else {
-//       cb(new Error('Only image files are allowed'), false);
-//     }
-//   }
-// });
-
 // Middleware to verify JWT token
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -100,6 +74,17 @@ const verifyToken = (req, res, next) => {
   }
 };
 
+// Test DB connection route
+app.get('/test-db', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT NOW()');
+    res.status(200).json({ message: 'DB connected successfully', time: rows[0].now });
+  } catch (err) {
+    console.error('DB Connection Error:', err.message);
+    res.status(500).json({ message: 'DB connection failed' });
+  }
+});
+
 // Endpoint for owner signup
 app.post('/signup', async (req, res) => {
   const { name, contact, email, password, userType } = req.body;
@@ -112,89 +97,74 @@ app.post('/signup', async (req, res) => {
 
   //validate email format
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)){
+  if (!emailRegex.test(email)) {
     return res.status(400).send('please input email in correct format');
   }
 
   //validate password strength
   const passwordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{12,}$/;
-  if(!passwordRegex.test(password)){
+  if (!passwordRegex.test(password)) {
     return res.status(400).send('password must be atleast 12 characters long, with at least one upper case letter, one number and one special character');
   }
 
   //prevent password from being the same as the name or email
-  if(password.toLowerCase().includes(name.toLowerCase()) || password.toLowerCase().includes(email.toLowerCase())) {
+  if (password.toLowerCase().includes(name.toLowerCase()) || password.toLowerCase().includes(email.toLowerCase())) {
     return res.status(400).send('Password cannot contain your name or email');
   }
 
   //validate phone number(only digits and length 10)
   const phoneRegex = /^\d{10}$/;
-  if(!phoneRegex.test(contact)){
+  if (!phoneRegex.test(contact)) {
     return res.status(400).send('invalid phone number. It must contain exactly 10 digits')
   }
 
   //check if the userTypes are the required ones
-  const userTypes = ['owner','customer','admin'];
+  const userTypes = ['owner', 'customer', 'admin'];
 
-  if(!userTypes.includes(userType)){
+  if (!userTypes.includes(userType)) {
     return res.status(400).send('Valid user type required');
   }
 
   try {
     // Check if the email already exists
-    db.get(
-      'SELECT email FROM users WHERE email = ?',
-      [email],
-      async (err, row) => {
-        console.log('database query  result: ', {err, row});
-        if (err) {
-          console.error('Database error:', err.message);
-          return res.status(500).send('Internal Server Error');
-        }
-        if (row) {
-          console.log('existing user already found: ', row);
-          return res.status(409).send('Email already registered');
-        }
+    const existingUser = await pool.query('SELECT email FROM users WHERE email = $1', [email]);
+    
+    console.log('database query result: ', existingUser.rows);
+    if (existingUser.rows.length > 0) {
+      console.log('existing user already found: ', existingUser.rows[0]);
+      return res.status(409).send('Email already registered');
+    }
 
-        // Hash the password
-        const saltRounds = 10;
-        const hashedPassword = await bcrypt.hash(password, saltRounds);
+    // Hash the password
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-        // Insert user into the database
-        db.run(
-          `INSERT INTO users (name, contact, email, password, userType) VALUES (?, ?, ?, ?, ?)`,
-          [name, contact, email, hashedPassword, userType],
-          function (err) {
-            if (err) {
-              console.error('Database error:', err.message);
-              return res.status(500).send('Internal Server Error');
-            }
-
-            // Generate email verification token
-            const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
-
-            // Send email verification link
-            const verificationLink = `https://kasikotas.netlify.app/owner/verify-email?token=${token}`; 
-            const mailOptions = {
-              from: process.env.EMAIL_USER,
-              to: email,
-              subject: 'Email Verification',
-              text: `Welcome, ${name}! Please verify your email by clicking on the link: ${verificationLink}`,
-              html: `<p>Welcome, ${name}!</p><p>Please verify your email by clicking on the link below:</p><a href="${verificationLink}">Verify Email</a>`,
-            };
-
-            transporter.sendMail(mailOptions, (error, info) => {
-              if (error) {
-                console.error('Email error:', error.message);
-                return res.status(500).json({error: error.message});
-              }
-              console.log('email sent: ', info.response);
-              res.status(201).json({ message: 'User created successfully. Check your email for verification.' });
-            });
-          }
-        );
-      }
+    // Insert user into the database
+    const result = await pool.query(
+      `INSERT INTO users (name, contact, email, password, usertype) 
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [name, contact, email, hashedPassword, userType]
     );
+    
+    const userId = result.rows[0].id;
+
+    // Generate email verification token
+    const token = jwt.sign({ email }, JWT_SECRET, { expiresIn: '1h' });
+
+    // Send email verification link
+    const verificationLink = `https://kasikotas.netlify.app/owner/verify-email?token=${token}`;
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Email Verification',
+      text: `Welcome, ${name}! Please verify your email by clicking on the link: ${verificationLink}`,
+      html: `<p>Welcome, ${name}!</p><p>Please verify your email by clicking on the link below:</p><a href="${verificationLink}">Verify Email</a>`,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log('email sent: ', info.response);
+    res.status(201).json({ message: 'User created successfully. Check your email for verification.' });
+    
   } catch (err) {
     console.error('Error during signup:', err.message);
     res.status(500).send('Internal Server Error');
@@ -202,7 +172,7 @@ app.post('/signup', async (req, res) => {
 });
 
 // Endpoint for email verification
-app.get('/verify-email', (req, res) => {
+app.get('/verify-email', async (req, res) => {
   const { token } = req.query;
 
   if (!token) {
@@ -214,23 +184,23 @@ app.get('/verify-email', (req, res) => {
     const { email } = decoded;
 
     // Mark email as verified in the database
-    db.run(`UPDATE users SET isVerified = 1 WHERE email = ?`, [email], function (err) {
-      if (err) {
-        console.error('Database error:', err.message);
-        return res.status(500).send('Internal Server Error');
-      }
+    const result = await pool.query(
+      'UPDATE users SET isverified = true WHERE email = $1',
+      [email]
+    );
 
-      res.send('Email successfully verified! You can now log in.');
-    });
+    if (result.rowCount === 0) {
+      return res.status(404).send('User not found');
+    }
+    
+    res.send('Email successfully verified! You can now log in.');
   } catch (err) {
     console.error('Invalid or expired token:', err.message);
     res.status(400).send('Invalid or expired token');
   }
 });
 
-//endpoint for password reset
-
-//Endpoint for user login
+// Endpoint for user login
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
 
@@ -240,187 +210,180 @@ app.post('/login', async (req, res) => {
   }
 
   try {
-    // Retrieve owner from the database
-    db.get(`SELECT * FROM users WHERE email = ?`, [email], async (err, user) => {
-      if (err) {
-        console.error('Database error:', err.message);
-        return res.status(500).send('Internal Server Error');
-      }
+    // Retrieve user from the database
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = result.rows[0];
 
-      if (!user) {
-        return res.status(404).send('User not found');
-      }
+    if (!user) {
+      return res.status(404).send('User not found');
+    }
 
-      // Check if the email is verified
-      if (!user.isVerified) {
-        return res.status(403).send('Please verify your email before logging in');
-      }
+    // Check if the email is verified
+    if (!user.isverified) {
+      return res.status(403).send('Please verify your email before logging in');
+    }
 
-      // Validate password
-      const isValidPassword = await bcrypt.compare(password, user.password);
+    // Validate password
+    const isValidPassword = await bcrypt.compare(password, user.password);
 
-      if (!isValidPassword) {
-        return res.status(401).send('Invalid password');
-      }
+    if (!isValidPassword) {
+      return res.status(401).send('Invalid password');
+    }
 
-      // Authentication successful, generate JWT token
-      const token = jwt.sign(
-        { id: user.id, email: user.email },
-        JWT_SECRET,
-        { expiresIn: '1h' } // Token expires in 1 hour
-      );
+    // Authentication successful, generate JWT token
+    const token = jwt.sign(
+      { id: user.id, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '1h' } // Token expires in 1 hour
+    );
 
-      // Respond with token and user details
-      res.status(200).json({
-        message: 'Login successful',
-        token,
-        name: user.name,
-        email: user.email,
-        id: user.id
-      });
+    // Respond with token and user details
+    res.status(200).json({
+      message: 'Login successful',
+      token,
+      name: user.name,
+      email: user.email,
+      id: user.id
     });
   } catch (err) {
-    console.error('Error during login:', err.message);
+    console.error('Error during login:', err);
     res.status(500).send('Internal Server Error');
   }
 });
 
 // Endpoint to get users
-app.get('/users', (req, res) => {
-  db.all(`SELECT * FROM users`, [], (err, rows) => {
-    if (err) {
-      console.error('Error retrieving users:', err.message);
-      res.status(500).send('Internal Server Error');
-    } else {
-      res.status(200).json(rows);
-    }
-  });
+app.get('/users', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM users');
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error('Error retrieving users:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
-//endpoint to update users
-app.put('/updateUsers/:id', verifyToken, (req, res) => {
+// Endpoint to update users
+app.put('/updateUsers/:id', verifyToken, async (req, res) => {
   const { id } = req.params;
   const updates = req.body;
 
-  db.get('SELECT id FROM users WHERE id = ?', [id], (err, user) =>{
-    if(err){
-      return res.status(500).json({message:'internal server error'});
+  try {
+    // Check if user exists and has permission
+    const userResult = await pool.query('SELECT id FROM users WHERE id = $1', [id]);
+    
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    if(!user){
-      return res.status(404).json({message: 'user not found'})
+    const user = userResult.rows[0];
+    if (user.id != req.user.id && req.user.usertype !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to update this user' });
     }
 
-    if(user.id != req.user.id && req.user.userType !== 'admin'){
-      return res.status(403).json({message: 'not authorized to update this shop'});
-    }
-  })
-
-  // Build the SQL query based on provided fields
-  const allowedFields = ['name', 'contact', 'email', 'password', 'isShopRegistered'];
-  
-  const fieldsToUpdate = [];
-  const valuesToUpdate = [];
-  
-  Object.keys(updates).forEach(field => {
-    if (allowedFields.includes(field)) {
-      fieldsToUpdate.push(`${field} = ?`);
-      
-      // Handle boolean values
-      if (typeof updates[field] === 'boolean') {
-        valuesToUpdate.push(updates[field] ? 1 : 0);
-      } else {
-        valuesToUpdate.push(updates[field]);
+    // Build the SQL query based on provided fields
+    const allowedFields = ['name', 'contact', 'email', 'password', 'isshopregistered'];
+    
+    const fieldsToUpdate = [];
+    const valuesToUpdate = [];
+    const values = [];
+    let paramIndex = 1;
+    
+    Object.keys(updates).forEach(field => {
+      if (allowedFields.includes(field.toLowerCase())) {
+        fieldsToUpdate.push(`${field.toLowerCase()} = $${paramIndex}`);
+        
+        // Handle boolean values
+        if (typeof updates[field] === 'boolean') {
+          values.push(updates[field]);
+        } else {
+          values.push(updates[field]);
+        }
+        paramIndex++;
       }
-    }
-  });
-  
-  // If no valid fields to update
-  if (fieldsToUpdate.length === 0) {
-    return res.status(400).json({ message: 'No valid fields to update' });
-  }
-  
-  // Add shopId to values
-  valuesToUpdate.push(id);
-  
-  // Construct and execute the update query
-  const query = `UPDATE users SET ${fieldsToUpdate.join(', ')} WHERE id = ?`;
-  
-  db.run(query, valuesToUpdate, function(err) {
-    if (err) {
-      console.error('Database error:', err.message);
-      return res.status(500).json({ message: 'Internal server error' });
+    });
+    
+    // If no valid fields to update
+    if (fieldsToUpdate.length === 0) {
+      return res.status(400).json({ message: 'No valid fields to update' });
     }
     
-    if (this.changes === 0) {
-      return res.status(404).json({ message: 'user not found' });
+    // Add user id to values
+    values.push(id);
+    
+    // Construct and execute the update query
+    const query = `UPDATE users SET ${fieldsToUpdate.join(', ')} WHERE id = $${paramIndex}`;
+    
+    const result = await pool.query(query, values);
+    
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'User not found' });
     }
     
     res.status(200).json({ 
-      message: 'user updated successfully',
-      updatedFields: Object.keys(updates).filter(field => allowedFields.includes(field))
+      message: 'User updated successfully',
+      updatedFields: Object.keys(updates).filter(field => allowedFields.includes(field.toLowerCase()))
         .reduce((obj, key) => {
           obj[key] = updates[key];
           return obj;
         }, {})
     });
-  });
+  } catch (err) {
+    console.error('Database error:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // Endpoint to get user by email
-app.get('/users/:email', (req, res) => {
+app.get('/users/:email', async (req, res) => {
   const { email } = req.params;
 
   if (!email) {
     return res.status(400).send('Email parameter is required');
   }
 
-  const query = 'SELECT * FROM users WHERE email = ?';
-  db.get(query, [email], (err, row) => {
-    if (err) {
-      console.error('Error retrieving user:', err.message);
-      return res.status(500).send('Internal Server Error');
-    }
-
-    if (!row) {
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    
+    if (result.rows.length === 0) {
       return res.status(404).send('User not found');
     }
 
-    res.status(200).json(row);
-  });
+    res.status(200).json(result.rows[0]);
+  } catch (err) {
+    console.error('Error retrieving user:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
-//Endpoint to update profile
-app.put('/updateProfile/:id', async (req, res) =>{
-  const {id} = req.params;
-  const {name, contact} = req.body;
+// Endpoint to update profile
+app.put('/updateProfile/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, contact } = req.body;
 
-  if(!id || !name || !contact){
-    return res.status(400).send('all fields are required');
+  if (!id || !name || !contact) {
+    return res.status(400).send('All fields are required');
   }
 
   const phoneRegex = /^\d{10}$/;
-  if(!phoneRegex.test(contact)){
-    return res.status(400).send('invalid phonenumber, it must contain 10 digits')
+  if (!phoneRegex.test(contact)) {
+    return res.status(400).send('Invalid phone number, it must contain 10 digits');
   }
 
-  const query = `
-    UPDATE users
-    SET name = ?,
-      contact = ?
-    WHERE id = ?
-  `;
+  try {
+    const result = await pool.query(
+      'UPDATE users SET name = $1, contact = $2 WHERE id = $3',
+      [name, contact, id]
+    );
 
-  db.run(query, [name, contact, id], function(err){
-    if(err){
-      console.error('error updating user:', err.message);
-      return res.status(500).send('internal server error');
+    if (result.rowCount === 0) {
+      return res.status(404).send('User not found');
     }
-    if(this.change === 0){
-      return res.status(404).send('user not found');
-    }
-    res.status(200).json({message: 'user profile updated successfully'});
-  });
+
+    res.status(200).json({ message: 'User profile updated successfully' });
+  } catch (err) {
+    console.error('Error updating user:', err.message);
+    res.status(500).send('Internal server error');
+  }
 });
 
 // Endpoint to reset password
@@ -437,48 +400,34 @@ app.post('/resetPassword', async (req, res) => {
     const resetTokenExpiry = Date.now() + 3600000; // Token valid for 1 hour
 
     // Update database with reset token
-    const query = `
-      UPDATE users 
-      SET resetToken = ?,
-          resetTokenExpiry = ?
-      WHERE email = ?
-    `;
+    const result = await pool.query(
+      'UPDATE users SET resettoken = $1, resettokenexpiry = $2 WHERE email = $3',
+      [resetToken, resetTokenExpiry, email]
+    );
 
-    db.run(query, [resetToken, resetTokenExpiry, ownerEmail], function(err) {
-      if (err) {
-        console.error('Database error:', err.message);
-        return res.status(500).send('Internal Server Error');
-      }
+    if (result.rowCount === 0) {
+      return res.status(404).send('Email not found');
+    }
 
-      if (this.changes === 0) {
-        return res.status(404).send('Email not found');
-      }
+    // Send reset password email
+    const resetLink = `http://localhost:2025/reset-password?token=${resetToken}`;
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Password Reset Request',
+      text: `Click the following link to reset your password: ${resetLink}`,
+      html: `<p>Click the following link to reset your password:</p><a href="${resetLink}">Reset Password</a>`
+    };
 
-      // Send reset password email
-      const resetLink = `http://localhost:2025/reset-password?token=${resetToken}`;
-      const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: 'Password Reset Request',
-        text: `Click the following link to reset your password: ${resetLink}`,
-        html: `<p>Click the following link to reset your password:</p><a href="${resetLink}">Reset Password</a>`
-      };
-
-      transporter.sendMail(mailOptions, (error, info) => {
-        if (error) {
-          console.error('Email error:', error.message);
-          return res.status(500).send('Failed to send reset email');
-        }
-        res.status(200).json({ message: 'Password reset email sent' });
-      });
-    });
+    await transporter.sendMail(mailOptions);
+    res.status(200).json({ message: 'Password reset email sent' });
   } catch (err) {
     console.error('Error in password reset:', err.message);
     res.status(500).send('Internal Server Error');
   }
 });
 
-// Endpoint to Confirm password reset
+// Endpoint to confirm password reset
 app.post('/confirmReset', async (req, res) => {
   const { token, newPassword } = req.body;
 
@@ -497,26 +446,16 @@ app.post('/confirmReset', async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
     // Update password and clear reset token
-    const query = `
-      UPDATE users 
-      SET password = ?,
-          resetToken = NULL,
-          resetTokenExpiry = NULL 
-      WHERE resetToken = ? AND resetTokenExpiry > ?
-    `;
+    const result = await pool.query(
+      'UPDATE users SET password = $1, resettoken = NULL, resettokenexpiry = NULL WHERE resettoken = $2 AND resettokenexpiry > $3',
+      [hashedPassword, token, Date.now()]
+    );
 
-    db.run(query, [hashedPassword, token, Date.now()], function(err) {
-      if (err) {
-        console.error('Database error:', err.message);
-        return res.status(500).send('Internal Server Error');
-      }
+    if (result.rowCount === 0) {
+      return res.status(400).send('Invalid or expired reset token');
+    }
 
-      if (this.changes === 0) {
-        return res.status(400).send('Invalid or expired reset token');
-      }
-
-      res.status(200).json({ message: 'Password reset successful' });
-    });
+    res.status(200).json({ message: 'Password reset successful' });
   } catch (err) {
     console.error('Error in password reset confirmation:', err.message);
     res.status(500).send('Internal Server Error');
@@ -524,7 +463,7 @@ app.post('/confirmReset', async (req, res) => {
 });
 
 // Endpoint for shop registration
-app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
+app.post('/registerShop', verifyToken, upload.single('logo'), async (req, res) => {
   const {
     ownerId,
     shopName,
@@ -539,8 +478,8 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
   } = req.body;
 
   // Validate required fields
-  if (!ownerId || !shopName || !shopAddress || !shopCity || !shopPostalCode || 
-      !shopDescription || !openingTime || !closingTime || !shopCategory || !deliveryRadius) {
+  if (!ownerId || !shopName || !shopAddress || !shopCity || !shopPostalCode ||
+    !shopDescription || !openingTime || !closingTime || !shopCategory || !deliveryRadius) {
     return res.status(400).json({ message: 'All fields are required' });
   }
 
@@ -549,44 +488,40 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
     return res.status(400).json({ message: 'Shop logo is required' });
   }
 
-  // 📦 Use the Cloudinary URL for logo
+  // Use the Cloudinary URL for logo
   const logoPath = req.file.path;
 
-  // Check if owner has already registered a shop
-  db.get('SELECT * FROM shops WHERE ownerId = ?', [ownerId], (err, existingShop) => {
-    if (err) {
-      console.error('Database error:', err.message);
-      return res.status(500).json({ message: 'Internal server error' });
-    }
+  try {
+    // Check if owner has already registered a shop
+    const existingShop = await pool.query(
+      'SELECT * FROM shops WHERE ownerid = $1',
+      [ownerId]
+    );
 
-    if (existingShop) {
+    if (existingShop.rows.length > 0) {
       return res.status(400).json({ message: 'You have already registered a shop' });
     }
 
     // Insert the shop into the database
-    const query = `
-      INSERT INTO shops (
-        ownerId,
-        shopName,
-        shopAddress,
-        shopCity,
-        shopPostalCode,
-        shopDescription,
-        openingTime,
-        closingTime,
-        shopCategory,
-        deliveryRadius,
-        logoUrl,
-        isApproved,
-        createdAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
-
-    const isApproved = 0; // Initial value, awaiting admin approval
+    const isApproved = false; // Initial value, awaiting admin approval
     const createdAt = new Date().toISOString();
 
-    db.run(
-      query,
+    const shopResult = await pool.query(
+      `INSERT INTO shops (
+        ownerid,
+        shopname,
+        shopaddress,
+        shopcity,
+        shoppostalcode,
+        shopdescription,
+        openingtime,
+        closingtime,
+        shopcategory,
+        deliveryradius,
+        logourl,
+        isapproved,
+        createdat
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING shopid`,
       [
         ownerId,
         shopName,
@@ -598,319 +533,303 @@ app.post('/registerShop', verifyToken, upload.single('logo'), (req, res) => {
         closingTime,
         shopCategory,
         deliveryRadius,
-        logoPath, // save the Cloudinary URL
+        logoPath,
         isApproved,
         createdAt
-      ],
-      function (err) {
-        if (err) {
-          console.error('Error registering shop:', err.message);
-          return res.status(500).json({ message: 'Internal server error' });
-        }
-
-        // Create a notification for the admin
-        const adminNotificationQuery = `
-          INSERT INTO notifications (
-            owner_id,
-            message,
-            notification_type,
-            created_at,
-            is_read
-          ) VALUES (?, ?, ?, ?, ?)
-        `;
-
-        const adminId = 1; 
-        const notificationMessage = `New shop registration from ${shopName} is awaiting approval`;
-        const notificationType = 'shop_registration';
-        const notificationTime = new Date().toISOString();
-
-        db.run(
-          adminNotificationQuery,
-          [adminId, notificationMessage, notificationType, notificationTime, 0],
-          function (err) {
-            if (err) {
-              console.error('Error creating admin notification:', err.message);
-            }
-
-            // Update the user's profile to mark shop as registered
-            db.run(
-              'UPDATE users SET isShopRegistered = 1 WHERE id = ?',
-              [ownerId],
-              function (err) {
-                if (err) {
-                  console.error('Error updating user profile:', err.message);
-                }
-
-                res.status(201).json({
-                  message: 'Shop registration submitted successfully. Awaiting admin approval.',
-                  shopId: this.lastID
-                });
-              }
-            );
-          }
-        );
-      }
+      ]
     );
-  });
+
+    const shopId = shopResult.rows[0].shopid;
+
+    // Create a notification for the admin
+    const adminId = 1;
+    const notificationMessage = `New shop registration from ${shopName} is awaiting approval`;
+    const notificationType = 'shop_registration';
+    const notificationTime = new Date().toISOString();
+
+    await pool.query(
+      `INSERT INTO notifications (
+        owner_id,
+        message,
+        notification_type,
+        created_at,
+        is_read
+      ) VALUES ($1, $2, $3, $4, $5)`,
+      [adminId, notificationMessage, notificationType, notificationTime, false]
+    );
+
+    // Update the user's profile to mark shop as registered
+    await pool.query(
+      'UPDATE users SET isshopregistered = true WHERE id = $1',
+      [ownerId]
+    );
+
+    res.status(201).json({
+      message: 'Shop registration submitted successfully. Awaiting admin approval.',
+      shopId: shopId
+    });
+  } catch (err) {
+    console.error('Error registering shop:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-
 // Endpoint to get shops
-app.get('/shops', (req, res) => {
-  db.all(`SELECT * FROM shops`, [], (err, rows) => {
-    if (err) {
-      console.error('Error retrieving shops:', err.message);
-      res.status(500).send('Internal Server Error');
-    } else {
-      res.status(200).json(rows);
-    }
-  });
+app.get('/shops', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM shops');
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error('Error retrieving shops:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Endpoint to get shop details
-app.get('/shops/:ownerId', (req, res) => {
+app.get('/shops/:ownerId', async (req, res) => {
   const { ownerId } = req.params;
-  db.get('SELECT * FROM shops WHERE ownerId = ?', [ownerId], (err, shop) => {
-    if (err) {
-      console.error('Database error:', err.message);
-      return res.status(500).json({ message: 'Internal server error' });
-    }
+  
+  try {
+    const result = await pool.query(
+      'SELECT * FROM shops WHERE ownerid = $1',
+      [ownerId]
+    );
 
-    if (!shop) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
-    res.status(200).json(shop);
-  });
+    res.status(200).json(result.rows[0]);
+  } catch (err) {
+    console.error('Database error:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // Endpoint to update a shop
-app.put('/shops/:shopId', verifyToken, (req, res) => {
+app.put('/shops/:shopId', verifyToken, async (req, res) => {
   const { shopId } = req.params;
   const updates = req.body;
 
-  db.get('SELECT ownerId FROM shops WHERE shopId = ?', [shopId], (err, shop) =>{
-    if(err){
-      return res.status(500).json({message:'internal server error'});
+  try {
+    // Check if shop exists and user has permission
+    const shopResult = await pool.query(
+      'SELECT ownerid FROM shops WHERE shopid = $1',
+      [shopId]
+    );
+
+    if (shopResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Shop not found' });
     }
 
-    if(!shop){
-      return res.status(404).json({message: 'shop not found'})
+    const shop = shopResult.rows[0];
+    if (shop.ownerid != req.user.id && req.user.usertype !== 'admin') {
+      return res.status(403).json({ message: 'Not authorized to update this shop' });
     }
 
-    if(shop.ownerId != req.user.id && req.user.userType !== 'admin'){
-      return res.status(403).json({message: 'not authorized to update this shop'});
-    }
-  })
-
-  // Build the SQL query based on provided fields
-  const allowedFields = ['shopName', 'shopAddress', 'shopCity', 'shopPostalCode', 
-                        'shopDescription', 'openingTime', 'closingTime', 
-                        'shopCategory', 'deliveryRadius', 'isApproved', 
-                        'rejectionReason', 'shopStatus'];
-  
-  const fieldsToUpdate = [];
-  const valuesToUpdate = [];
-  
-  Object.keys(updates).forEach(field => {
-    if (allowedFields.includes(field)) {
-      fieldsToUpdate.push(`${field} = ?`);
-      
-      // Handle boolean values
-      if (typeof updates[field] === 'boolean') {
-        valuesToUpdate.push(updates[field] ? 1 : 0);
-      } else {
-        valuesToUpdate.push(updates[field]);
+    // Build the SQL query based on provided fields
+    const allowedFields = ['shopname', 'shopaddress', 'shopcity', 'shoppostalcode',
+      'shopdescription', 'openingtime', 'closingtime',
+      'shopcategory', 'deliveryradius', 'isapproved',
+      'rejectionreason', 'shopstatus'];
+    
+    const fieldsToUpdate = [];
+    const values = [];
+    let paramIndex = 1;
+    
+    Object.keys(updates).forEach(field => {
+      if (allowedFields.includes(field.toLowerCase())) {
+        fieldsToUpdate.push(`${field.toLowerCase()} = $${paramIndex}`);
+        
+        // Handle boolean values
+        if (typeof updates[field] === 'boolean') {
+          values.push(updates[field]);
+        } else {
+          values.push(updates[field]);
+        }
+        paramIndex++;
       }
-    }
-  });
-  
-  // If no valid fields to update
-  if (fieldsToUpdate.length === 0) {
-    return res.status(400).json({ message: 'No valid fields to update' });
-  }
-  
-  // Add shopId to values
-  valuesToUpdate.push(shopId);
-  
-  // Construct and execute the update query
-  const query = `UPDATE shops SET ${fieldsToUpdate.join(', ')} WHERE shopId = ?`;
-  
-  db.run(query, valuesToUpdate, function(err) {
-    if (err) {
-      console.error('Database error:', err.message);
-      return res.status(500).json({ message: 'Internal server error' });
+    });
+    
+    // If no valid fields to update
+    if (fieldsToUpdate.length === 0) {
+      return res.status(400).json({ message: 'No valid fields to update' });
     }
     
-    if (this.changes === 0) {
+    // Add shopId to values
+    values.push(shopId);
+    
+    // Construct and execute the update query
+    const query = `UPDATE shops SET ${fieldsToUpdate.join(', ')} WHERE shopid = $${paramIndex}`;
+    
+    const result = await pool.query(query, values);
+    
+    if (result.rowCount === 0) {
       return res.status(404).json({ message: 'Shop not found' });
     }
     
     res.status(200).json({ 
       message: 'Shop updated successfully',
-      updatedFields: Object.keys(updates).filter(field => allowedFields.includes(field))
+      updatedFields: Object.keys(updates).filter(field => allowedFields.includes(field.toLowerCase()))
         .reduce((obj, key) => {
           obj[key] = updates[key];
           return obj;
         }, {})
     });
-  });
+  } catch (err) {
+    console.error('Database error:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 // Endpoint for admin to approve/reject a shop
-app.put('/approveShop/:shopId', verifyToken, (req, res) => {
+app.put('/approveShop/:shopId', verifyToken, async (req, res) => {
   const { shopId } = req.params;
   const { isApproved, rejectionReason } = req.body;
 
   // Check if user is admin
-  if (req.user.userType !== 'admin') {
+  if (req.user.usertype !== 'admin') {
     return res.status(403).json({ message: 'Only admin can approve or reject shops' });
   }
 
-  db.get('SELECT ownerId, shopName FROM shops WHERE shopId = ?', [shopId], (err, shop) => {
-    if (err) {
-      console.error('Database error:', err.message);
-      return res.status(500).json({ message: 'Internal server error' });
-    }
+  try {
+    // Get shop information
+    const shopResult = await pool.query(
+      'SELECT ownerid, shopname FROM shops WHERE shopid = $1',
+      [shopId]
+    );
 
-    if (!shop) {
+    if (shopResult.rows.length === 0) {
       return res.status(404).json({ message: 'Shop not found' });
     }
 
+    const shop = shopResult.rows[0];
+
     // Update shop approval status
-    db.run(
-      'UPDATE shops SET isApproved = ?, rejectionReason = ? WHERE shopId = ?',
-      [isApproved ? 1 : 0, rejectionReason || null, shopId],
-      function (err) {
-        if (err) {
-          console.error('Error updating shop approval:', err.message);
-          return res.status(500).json({ message: 'Internal server error' });
-        }
-
-        // Create notification for the shop owner
-        const notificationType = isApproved ? 'shop_approved' : 'shop_rejected';
-        const notificationMessage = isApproved 
-          ? `Your shop ${shop.shopName} has been approved!`
-          : `Your shop ${shop.shopName} registration was not approved. Reason: ${rejectionReason}`;
-
-        db.run(
-          `INSERT INTO notifications (owner_id, message, notification_type, created_at, is_read)
-           VALUES (?, ?, ?, ?, ?)`,
-          [shop.ownerId, notificationMessage, notificationType, new Date().toISOString(), 0],
-          function (err) {
-            if (err) {
-              console.error('Error creating owner notification:', err.message);
-              // Continue anyway as this is not critical
-            }
-
-            res.status(200).json({ 
-              message: isApproved ? 'Shop approved successfully' : 'Shop rejected successfully' 
-            });
-          }
-        );
-      }
+    await pool.query(
+      'UPDATE shops SET isapproved = $1, rejectionreason = $2 WHERE shopid = $3',
+      [isApproved, rejectionReason || null, shopId]
     );
-  });
+
+    // Create notification for the shop owner
+    const notificationType = isApproved ? 'shop_approved' : 'shop_rejected';
+    const notificationMessage = isApproved
+      ? `Your shop ${shop.shopname} has been approved!`
+      : `Your shop ${shop.shopname} registration was not approved. Reason: ${rejectionReason}`;
+
+    await pool.query(
+      `INSERT INTO notifications (owner_id, message, notification_type, created_at, is_read)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [shop.ownerid, notificationMessage, notificationType, new Date().toISOString(), false]
+    );
+
+    res.status(200).json({
+      message: isApproved ? 'Shop approved successfully' : 'Shop rejected successfully'
+    });
+  } catch (err) {
+    console.error('Error updating shop approval:', err.message);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
-//Endpoint to create a new kota
-app.post('/createKota', (req, res) => {
+// Endpoint to create a new kota
+app.post('/createKota', async (req, res) => {
   const { ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price } = req.body;
 
   // Validate the input
   if (!ownerId || !kotaName || !price) {
-      return res.status(400).send('Owner ID, Kota name, and price are required');
+    return res.status(400).send('Owner ID, Kota name, and price are required');
   }
 
-  // Insert the Kota customization into the database
-  const query = `
-      INSERT INTO kotaContents (ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `;
+  try {
+    // Insert the Kota customization into the database
+    const result = await pool.query(
+      `INSERT INTO kotacontents (ownerid, kotaname, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING kotaid`,
+      [ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price]
+    );
 
-  db.run(query, [ownerId, kotaName, chips, russians, viennas, polony, cheese, lettuce, cucumber, eggs, toasted, price], function (err) {
-      if (err) {
-          console.error('Error creating Kota:', err.message);
-          return res.status(500).send('Internal Server Error');
-      }
-      res.status(201).json({ message: 'Kota created successfully', kotaId: this.lastID });
-  });
+    res.status(201).json({ message: 'Kota created successfully', kotaId: result.rows[0].kotaid });
+  } catch (err) {
+    console.error('Error creating Kota:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Get kotas endpoint
-app.get('/kotaContents', (req, res) => {
-  db.all(`SELECT * FROM kotaContents`, [], (err, rows) => {
-    if (err) {
-      console.error('Error retrieving kotas:', err.message);
-      res.status(500).send('Internal Server Error');
-    } else {
-      res.status(200).json(rows);
-    }
-  });
+app.get('/kotaContents', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM kotacontents');
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error('Error retrieving kotas:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Get each owner's kota by id endpoint
-app.get('/kotaContents/:ownerId', (req, res) => {
+app.get('/kotaContents/:ownerId', async (req, res) => {
   const { ownerId } = req.params;
 
   if (!ownerId) {
     return res.status(400).send('ID parameter is required');
   }
 
-  const query = 'SELECT * FROM kotaContents WHERE ownerId = ?';
-  db.get(query, [ownerId], (err, row) => {
-    if (err) {
-      console.error('Error retrieving kota:', err.message);
-      return res.status(500).send('Internal Server Error');
+  try {
+    const result = await pool.query(
+      'SELECT * FROM kotacontents WHERE ownerid = $1',
+      [ownerId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send('Kota not found');
     }
 
-    if (!row) {
-      return res.status(404).send('kota not found');
-    }
-
-    res.status(200).json(row);
-  });
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error('Error retrieving kota:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
-//continue editing from here
-
-//Endpoint to update kota contents
-app.put('/updateKota/:kotaId', (req, res) => {
-  const kotaId = Number(req.params.kotaId); // Ensure it's a valid number
+// Endpoint to update kota contents
+app.put('/updateKota/:kotaId', async (req, res) => {
+  const kotaId = req.params.kotaId;
   const updates = req.body;
 
   if (!kotaId) {
-    return res.status(400).json({ error: 'Kota Id is required and must be a number' });
+    return res.status(400).json({ error: 'Kota Id is required' });
   }
 
-  // Get the current kota data first
-  db.get('SELECT * FROM kota_contents WHERE kota_id = ?', [kota_id], (err, currentKota) => {
-    if (err) {
-      console.error('Error fetching kota:', err.message);
-      return res.status(500).json({ error: 'Internal server error' });
-    }
-
-    if (!currentKota) {
+  try {
+    // Get the current kota data first
+    const currentKotaResult = await pool.query('SELECT * FROM kotacontents WHERE kotaid = $1', [kotaId]);
+    
+    if (currentKotaResult.rows.length === 0) {
       return res.status(404).json({ error: 'Kota not found' });
     }
 
+    const currentKota = currentKotaResult.rows[0];
+
     // Define allowed fields
-    const validFields = ['kota_name', 'chips', 'russians', 'viennas', 'polony', 
-                         'cheese', 'lettuce', 'cucumber', 'eggs', 'toasted', 'price'];
+    const validFields = ['kotaname', 'chips', 'russians', 'viennas', 'polony', 
+                        'cheese', 'lettuce', 'cucumber', 'eggs', 'toasted', 'price'];
 
     // Filter updates to only valid fields
     const updateFields = [];
     const updateValues = [];
+    let paramIndex = 1;
 
     Object.keys(updates).forEach(field => {
-      if (validFields.includes(field) && updates[field] !== undefined) {
+      if (validFields.includes(field.toLowerCase()) && updates[field] !== undefined) {
         const newValue = updates[field];
 
         // Skip update if value hasn't changed
-        if (currentKota[field] == newValue) return;
+        if (currentKota[field.toLowerCase()] == newValue) return;
 
-        updateFields.push(`${field} = ?`);
-        updateValues.push(typeof newValue === 'number' ? newValue : String(newValue)); 
+        updateFields.push(`${field.toLowerCase()} = $${paramIndex}`);
+        updateValues.push(newValue);
+        paramIndex++;
       }
     });
 
@@ -919,138 +838,121 @@ app.put('/updateKota/:kotaId', (req, res) => {
       return res.status(400).json({ error: 'No valid changes to update' });
     }
 
-    // Add kota_id to values for WHERE clause
-    updateValues.push(kota_id);
+    // Add kotaId to values for WHERE clause
+    updateValues.push(kotaId);
 
-    const query = `UPDATE kota_contents SET ${updateFields.join(', ')} WHERE kota_id = ?`;
+    const query = `UPDATE kotacontents SET ${updateFields.join(', ')} WHERE kotaid = $${paramIndex}`;
 
-    db.run(query, updateValues, function(err) {
-      if (err) {
-        console.error('Error updating kota:', err.message);
-        return res.status(500).json({ error: 'Internal server error' });
-      }
+    const result = await pool.query(query, updateValues);
 
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Kota not updated. Ensure the ID is correct.' });
-      }
-
-      // Fetch updated data for verification
-      db.get('SELECT * FROM kota_contents WHERE kota_id = ?', [kota_id], (err, updatedKota) => {
-        if (err) {
-          console.error('Error fetching updated kota:', err.message);
-          return res.status(500).json({ error: 'Update successful, but could not fetch new data' });
-        }
-        res.status(200).json({
-          message: 'Kota updated successfully',
-          updatedKota
-        });
-      });
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Kota not updated. Ensure the ID is correct.' });
+    }
+    
+    // Fetch updated data for verification
+    const updatedKotaResult = await pool.query('SELECT * FROM kotacontents WHERE kotaid = $1', [kotaId]);
+    
+    res.status(200).json({
+      message: 'Kota updated successfully',
+      updatedKota: updatedKotaResult.rows[0]
     });
-  });
+  } catch (err) {
+    console.error('Error updating kota:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-//Endpoint to delete kota
-app.delete('/deleteKota/:kotaId', (req,res) =>{
-  const {kota_id} = req.params;
+// Endpoint to delete kota
+app.delete('/deleteKota/:kotaId', async (req, res) => {
+  const { kotaId } = req.params;
 
-  if(!kota_id){
+  if (!kotaId) {
     return res.status(400).send('Kota Id is required');
   }
 
-  const query = 'DELETE FROM kota_contents WHERE  kota_id =?';
-  db.run(query, [kota_id], function(err){
-    if(err){
-      console.error('error deleting kota:', err.message);
-      return res.status(500).send('internal server error');
+  try {
+    const result = await pool.query('DELETE FROM kotacontents WHERE kotaid = $1', [kotaId]);
+    
+    if (result.rowCount === 0) {
+      return res.status(404).send('Kota not found');
     }
-    if(this.change === 0){
-      return res.status(404).send('kota not found');
-    }
-    res.status(200).json({message: 'kota deleted successfully'});
-  });
+    
+    res.status(200).json({ message: 'Kota deleted successfully' });
+  } catch (err) {
+    console.error('Error deleting kota:', err.message);
+    res.status(500).send('Internal server error');
+  }
 });
 
 // Create new order endpoint
-app.post('/createOrder', (req, res) => {
+app.post('/createOrder', async (req, res) => {
   const { 
-    owner_id,
-    customer_name,
-    customer_contact,
-    kota_id,
+    ownerId,
+    customerName,
+    customerContact,
+    kotaId,
     quantity,
-    total_price,
-    special_instructions
+    totalPrice,
+    specialInstructions
   } = req.body;
 
-  if (!owner_id || !customer_name || !customer_contact || !kota_id || !quantity || !total_price) {
+  if (!ownerId || !customerName || !customerContact || !kotaId || !quantity || !totalPrice) {
     return res.status(400).send('Required fields are missing');
   }
 
   const orderStatus = 'pending'; // Initial status
+  const orderDate = new Date().toISOString();
 
-  // First create the order
-  const orderQuery = `
-    INSERT INTO orders (
-      owner_id,
-      customer_name,
-      customer_contact,
-      kota_id,
-      quantity,
-      total_price,
-      special_instructions,
-      order_status,
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `;
+  try {
+    // First create the order
+    const orderResult = await pool.query(
+      `INSERT INTO orders (
+        ownerid,
+        customername,
+        customercontact,
+        kotaid,
+        quantity,
+        totalprice,
+        specialinstructions,
+        orderstatus,
+        orderdate
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING orderid`,
+      [ownerId, customerName, customerContact, kotaId, quantity, totalPrice, 
+       specialInstructions, orderStatus, orderDate]
+    );
 
-  db.run(orderQuery, 
-    [owner_id, customer_name, customer_contact, kota_id, quantity, total_price, 
-     special_instructions, orderStatus],
-    function(err) {
-      if (err) {
-        console.error('Error creating order:', err.message);
-        return res.status(500).send('Internal Server Error');
-      }
+    const orderId = orderResult.rows[0].orderid;
 
-      const order_id = this.lastID;
+    // Create notification for the owner
+    const notificationMessage = `New order received from ${customerName}`;
+    const notificationType = 'new_order';
+    const currentTime = new Date().toISOString();
 
-      // Create notification for the owner
-      const notificationQuery = `
-        INSERT INTO notifications (
-          owner_id,
-          order_id,
-          message,
-          notification_type,
-          created_at,
-          is_read
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `;
+    const notificationResult = await pool.query(
+      `INSERT INTO notifications (
+        owner_id,
+        order_id,
+        message,
+        notification_type,
+        created_at,
+        is_read
+      ) VALUES ($1, $2, $3, $4, $5, $6) RETURNING notification_id`,
+      [ownerId, orderId, notificationMessage, notificationType, currentTime, false]
+    );
 
-      const notificationMessage = `New order received from ${customer_name}`;
-      const notificationType = 'new_order';
-      const currentTime = new Date().toISOString();
-
-      db.run(notificationQuery,
-        [owner_id, order_id, notificationMessage, notificationType, currentTime, 0],
-        function(err) {
-          if (err) {
-            console.error('Error creating notification:', err.message);
-            return res.status(500).send('Internal Server Error');
-          }
-
-          res.status(201).json({ 
-            message: 'Order created successfully',
-            order_id: order_id,
-            notification_id: this.lastID
-          });
-        }
-      );
-    }
-  );
+    res.status(201).json({ 
+      message: 'Order created successfully',
+      orderId: orderId,
+      notificationId: notificationResult.rows[0].notification_id
+    });
+  } catch (err) {
+    console.error('Error creating order:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
-
 // Get all orders for an owner
-app.get('/ownerOrders/:ownerId', (req, res) => {
+app.get('/ownerOrders/:ownerId', async (req, res) => {
   const { ownerId } = req.params;
   const { status } = req.query; // Optional status filter
 
@@ -1058,201 +960,231 @@ app.get('/ownerOrders/:ownerId', (req, res) => {
     return res.status(400).send('Owner ID is required');
   }
 
-  let query = `
-    SELECT o.*, k.kotaName 
-    FROM orders o
-    LEFT JOIN kotaContents k ON o.kotaId = k.kotaId
-    WHERE o.ownerId = ?
-  `;
+  try {
+    let query = `
+      SELECT o.*, k.kotaname 
+      FROM orders o
+      LEFT JOIN kotacontents k ON o.kotaid = k.kotaid
+      WHERE o.ownerid = $1
+    `;
 
-  const queryParams = [ownerId];
+    const queryParams = [ownerId];
+    let paramIndex = 2;
 
-  if (status) {
-    query += ' AND o.orderStatus = ?';
-    queryParams.push(status);
-  }
-
-  query += ' ORDER BY o.orderDate DESC';
-
-  db.all(query, queryParams, (err, rows) => {
-    if (err) {
-      console.error('Error retrieving orders:', err.message);
-      return res.status(500).send('Internal Server Error');
+    if (status) {
+      query += ` AND o.orderstatus = $${paramIndex}`;
+      queryParams.push(status);
+      paramIndex++;
     }
-    res.status(200).json(rows);
-  });
+
+    query += ' ORDER BY o.orderdate DESC';
+
+    const result = await pool.query(query, queryParams);
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error('Error retrieving orders:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Get specific order by ID
-app.get('/orders/:orderId', (req, res) => {
-  const { order_id } = req.params;
+app.get('/orders/:orderId', async (req, res) => {
+  const { orderId } = req.params;
 
-  if (!order_id) {
+  if (!orderId) {
     return res.status(400).send('Order ID is required');
   }
 
-  const query = `
-    SELECT o.*, k.kota_name 
-    FROM orders o
-    LEFT JOIN kota_contents k ON o.kota_id = k.kota_id
-    WHERE o.order_id = ?
-  `;
+  try {
+    const query = `
+      SELECT o.*, k.kotaname 
+      FROM orders o
+      LEFT JOIN kotacontents k ON o.kotaid = k.kotaid
+      WHERE o.orderid = $1
+    `;
 
-  db.get(query, [order_id], (err, row) => {
-    if (err) {
-      console.error('Error retrieving order:', err.message);
-      return res.status(500).send('Internal Server Error');
-    }
+    const result = await pool.query(query, [orderId]);
 
-    if (!row) {
+    if (result.rows.length === 0) {
       return res.status(404).send('Order not found');
     }
 
-    res.status(200).json(row);
-  });
+    res.status(200).json(result.rows[0]);
+  } catch (err) {
+    console.error('Error retrieving order:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Update order status
-app.put('/updateOrderStatus/:orderId', (req, res) => {
-  const { order_id } = req.params;
-  const { order_status } = req.body;
+app.put('/updateOrderStatus/:orderId', async (req, res) => {
+  const { orderId } = req.params;
+  const { orderStatus } = req.body;
 
-  if (!order_id || !order_status) {
+  if (!orderId || !orderStatus) {
     return res.status(400).send('Order ID and status are required');
   }
 
   // Validate status
   const validStatuses = ['pending', 'preparing', 'ready', 'delivered', 'cancelled'];
-  if (!validStatuses.includes(order_status)) {
+  if (!validStatuses.includes(orderStatus)) {
     return res.status(400).send('Invalid order status');
   }
 
-  db.get('SELECT owner_id, customer_name FROM orders WHERE order_id=?',
-    [order_id],
-    (err, order) =>{
-      if (err) return res.status(500).send('internal server error');
-      if (order) return resolveSoa.status(404).send('order not found');
+  try {
+    // Get order details
+    const orderResult = await pool.query(
+      'SELECT ownerid, customername FROM orders WHERE orderid = $1',
+      [orderId]
+    );
 
-      db.run('UPDATE  orders SET order_status = ? WHERE order_id = ?', [order_status, order_id], function(err){
-        if (err) return res.status(500).send('internal servor error');
-
-        const notificationData = {
-          owner_id : order.owner_id,
-          order_id : order_id,
-          notification_type : order_status === 'cancelled' ? 'order_cancelled' : 'order_update',
-          message: order_status === 'cancelled'?
-          `Order #${order_id} from ${order.customer_name} has been cancelled` :
-          `Oder #${order_id} status updateed to ${order_status}`
-        };
-
-        //insert notification
-        db.run(`INSERT INTO notifications (owner_id, order_id, message, notification_type) VALUES (?,?,?,?)`,
-          [notificationData.owner_id, notificationData.order_id, notificationData.message, notificationData.notification_type]);
-
-          res.status(200).json({message: 'order status updated successfully'});
-        }
-      );
+    if (orderResult.rows.length === 0) {
+      return res.status(404).send('Order not found');
     }
-  );
+
+    const order = orderResult.rows[0];
+
+    // Update order status
+    await pool.query(
+      'UPDATE orders SET orderstatus = $1 WHERE orderid = $2',
+      [orderStatus, orderId]
+    );
+
+    // Create notification
+    const notificationData = {
+      owner_id: order.ownerid,
+      order_id: orderId,
+      notification_type: orderStatus === 'cancelled' ? 'order_cancelled' : 'order_update',
+      message: orderStatus === 'cancelled' ?
+        `Order #${orderId} from ${order.customername} has been cancelled` :
+        `Order #${orderId} status updated to ${orderStatus}`,
+      created_at: new Date().toISOString(),
+      is_read: false
+    };
+
+    // Insert notification
+    await pool.query(
+      `INSERT INTO notifications 
+        (owner_id, order_id, message, notification_type, created_at, is_read) 
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        notificationData.owner_id, 
+        notificationData.order_id, 
+        notificationData.message, 
+        notificationData.notification_type,
+        notificationData.created_at,
+        notificationData.is_read
+      ]
+    );
+
+    res.status(200).json({ message: 'Order status updated successfully' });
+  } catch (err) {
+    console.error('Error updating order status:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
-//endpoint to post notification
-app.post('/notifications', verifyToken, (req, res) =>{
-  const {userId, userName, userType, title, message, notificationType, isRead, isDismissed } = req.body;
+// Endpoint to post notification
+app.post('/notifications', verifyToken, async (req, res) => {
+  const { userId, userName, userType, title, message, notificationType, isRead, isDismissed } = req.body;
 
-  if(!userId || !userName || !userType || !title || !message || !notificationType){
-    return res.status(400).send('userId , user name, usertype, title, message and notification type are required');
-  };
+  if (!userId || !userName || !userType || !title || !message || !notificationType) {
+    return res.status(400).send('userId, userName, userType, title, message and notificationType are required');
+  }
 
-  const query = `
-      INSERT INTO notification (userId, userName, userType, title, message, notificationType, isRead, isDismissed)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `;
+  try {
+    const result = await pool.query(
+      `INSERT INTO notifications 
+        (user_id, user_name, user_type, title, message, notification_type, is_read, is_dismissed, created_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING notification_id`,
+      [
+        userId, userName, userType, title, message, notificationType, 
+        isRead || false, isDismissed || false, new Date().toISOString()
+      ]
+    );
 
-  db.run(query, [userId, userName, userType, title, message, notificationType, isRead, isDismissed], function (err) {
-    if (err) {
-        console.error('Error creating notification:', err.message);
-        return res.status(500).send('Internal Server Error');
-    }
-    res.status(201).json({ message: 'notification created successfully', userId: this.lastID });
-  });
+    res.status(201).json({ 
+      message: 'Notification created successfully', 
+      notificationId: result.rows[0].notification_id 
+    });
+  } catch (err) {
+    console.error('Error creating notification:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Get all notifications for an owner
-app.get('/ownerNotifications/:ownerId', (req, res) => {
+app.get('/ownerNotifications/:ownerId', async (req, res) => {
   const { ownerId } = req.params;
 
   if (!ownerId) {
     return res.status(400).send('Owner ID is required');
   }
 
-  const query = `
-    SELECT * FROM notifications 
-    WHERE userId = ? 
-    ORDER BY created_at DESC
-  `;
+  try {
+    const result = await pool.query(
+      `SELECT * FROM notifications 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC`,
+      [ownerId]
+    );
 
-  db.all(query, [ownerId], (err, rows) => {
-    if (err) {
-      console.error('Error retrieving notifications:', err.message);
-      return res.status(500).send('Internal Server Error');
-    }
-    res.status(200).json(rows);
-  });
+    res.status(200).json(result.rows);
+  } catch (err) {
+    console.error('Error retrieving notifications:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Mark notification as read
-app.put('/markNotificationRead/:notificationId', (req, res) => {
-  const { notification_id } = req.params;
+app.put('/markNotificationRead/:notificationId', async (req, res) => {
+  const { notificationId } = req.params;
 
-  if (!notification_id) {
+  if (!notificationId) {
     return res.status(400).send('Notification ID is required');
   }
 
-  const query = `
-    UPDATE notifications 
-    SET is_read = 1 
-    WHERE notification_id = ?
-  `;
+  try {
+    const result = await pool.query(
+      'UPDATE notifications SET is_read = true WHERE notification_id = $1',
+      [notificationId]
+    );
 
-  db.run(query, [notification_id], function(err) {
-    if (err) {
-      console.error('Error marking notification as read:', err.message);
-      return res.status(500).send('Internal Server Error');
-    }
-
-    if (this.changes === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).send('Notification not found');
     }
 
     res.status(200).json({ message: 'Notification marked as read' });
-  });
+  } catch (err) {
+    console.error('Error marking notification as read:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
 
 // Delete notification
-app.delete('/deleteNotification/:notificationId', (req, res) => {
-  const { notification_id } = req.params;
+app.delete('/deleteNotification/:notificationId', async (req, res) => {
+  const { notificationId } = req.params;
 
-  if (!notification_id) {
+  if (!notificationId) {
     return res.status(400).send('Notification ID is required');
   }
 
-  const query = 'DELETE FROM notifications WHERE notification_id = ?';
+  try {
+    const result = await pool.query(
+      'DELETE FROM notifications WHERE notification_id = $1',
+      [notificationId]
+    );
 
-  db.run(query, [notification_id], function(err) {
-    if (err) {
-      console.error('Error deleting notification:', err.message);
-      return res.status(500).send('Internal Server Error');
-    }
-
-    if (this.changes === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).send('Notification not found');
     }
 
     res.status(200).json({ message: 'Notification deleted successfully' });
-  });
+  } catch (err) {
+    console.error('Error deleting notification:', err.message);
+    res.status(500).send('Internal Server Error');
+  }
 });
-
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
