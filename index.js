@@ -232,7 +232,7 @@ app.post('/login', async (req, res) => {
 
     // Authentication successful, generate JWT token
     const token = jwt.sign(
-      { id: user.id, email: user.email },
+      { id: user.id, email: user.email, usertype: user.usertype },
       JWT_SECRET,
       { expiresIn: '1h' } // Token expires in 1 hour
     );
@@ -543,7 +543,7 @@ app.post('/registerShop', verifyToken, upload.single('logo'), async (req, res) =
 
     // Create a notification for the admin
     const adminid = 1;
-    const notificationmessage = `New shop registration from ${shopName} is awaiting approval`;
+    const notificationmessage = `New shop registration from ${shopname} is awaiting approval`;
     const notificationtype = 'shop_registration';
     const notificationtime = new Date().toISOString();
 
@@ -627,6 +627,10 @@ app.put('/shops/:shopid', verifyToken, async (req, res) => {
       return res.status(403).json({ message: 'Not authorized to update this shop' });
     }
 
+    console.log('Shop owner:', shop.ownerid);
+    console.log('Current user:', req.user.id);
+    console.log('User type:', req.user.usertype);
+
     // Build the SQL query based on provided fields
     const allowedFields = ['shopname', 'shopaddress', 'shopcity', 'shoppostalcode',
       'shopdescription', 'openingtime', 'closingtime',
@@ -656,7 +660,7 @@ app.put('/shops/:shopid', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
     
-    // Add shopId to values
+    // Add shopid to values
     values.push(shopid);
     
     // Construct and execute the update query
