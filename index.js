@@ -87,11 +87,11 @@ app.get('/test-db', async (req, res) => {
 
 // Endpoint for owner signup
 app.post('/signup', async (req, res) => {
-  const { name, contact, email, password, userType } = req.body;
+  const { name, contact, email, password, usertype } = req.body;
   console.log("API request body: ", req.body);
 
   // Validate input presence
-  if (!name || !contact || !email || !password || !userType) {
+  if (!name || !contact || !email || !password || !usertype) {
     return res.status(400).send('All fields are required');
   }
 
@@ -121,7 +121,7 @@ app.post('/signup', async (req, res) => {
   //check if the userTypes are the required ones
   const userTypes = ['owner', 'customer', 'admin'];
 
-  if (!userTypes.includes(userType)) {
+  if (!userTypes.includes(usertype)) {
     return res.status(400).send('Valid user type required');
   }
 
@@ -143,7 +143,7 @@ app.post('/signup', async (req, res) => {
     const result = await pool.query(
       `INSERT INTO users (name, contact, email, password, usertype) 
        VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [name, contact, email, hashedPassword, userType]
+      [name, contact, email, hashedPassword, usertype]
     );
     
     const userId = result.rows[0].id;
@@ -465,21 +465,21 @@ app.post('/confirmReset', async (req, res) => {
 // Endpoint for shop registration
 app.post('/registerShop', verifyToken, upload.single('logo'), async (req, res) => {
   const {
-    ownerId,
-    shopName,
-    shopAddress,
-    shopCity,
-    shopPostalCode,
-    shopDescription,
-    openingTime,
-    closingTime,
-    shopCategory,
-    deliveryRadius
+    ownerid,
+    shopname,
+    shopaddress,
+    shopcity,
+    shoppostalcode,
+    shopdescription,
+    openingtime,
+    closingtime,
+    shopcategory,
+    deliveryradius
   } = req.body;
 
   // Validate required fields
-  if (!ownerId || !shopName || !shopAddress || !shopCity || !shopPostalCode ||
-    !shopDescription || !openingTime || !closingTime || !shopCategory || !deliveryRadius) {
+  if (!ownerid || !shopname || !shopaddress || !shopcity || !shoppostalcode ||
+    !shopdescription || !openingtime || !closingtime || !shopcategory || !deliveryradius) {
     return res.status(400).json({ message: 'All fields are required' });
   }
 
@@ -503,8 +503,8 @@ app.post('/registerShop', verifyToken, upload.single('logo'), async (req, res) =
     }
 
     // Insert the shop into the database
-    const isApproved = false; // Initial value, awaiting admin approval
-    const createdAt = new Date().toISOString();
+    const isapproved = false; // Initial value, awaiting admin approval
+    const createdat = new Date().toISOString();
 
     const shopResult = await pool.query(
       `INSERT INTO shops (
@@ -523,29 +523,29 @@ app.post('/registerShop', verifyToken, upload.single('logo'), async (req, res) =
         createdat
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING shopid`,
       [
-        ownerId,
-        shopName,
-        shopAddress,
-        shopCity,
-        shopPostalCode,
-        shopDescription,
-        openingTime,
-        closingTime,
-        shopCategory,
-        deliveryRadius,
+        ownerid,
+        shopname,
+        shopaddress,
+        shopcity,
+        shoppostalcode,
+        shopdescription,
+        openingtime,
+        closingtime,
+        shopcategory,
+        deliveryradius,
         logoPath,
-        isApproved,
-        createdAt
+        isapproved,
+        createdat
       ]
     );
 
-    const shopId = shopResult.rows[0].shopid;
+    const shopid = shopResult.rows[0].shopid;
 
     // Create a notification for the admin
-    const adminId = 1;
-    const notificationMessage = `New shop registration from ${shopName} is awaiting approval`;
-    const notificationType = 'shop_registration';
-    const notificationTime = new Date().toISOString();
+    const adminid = 1;
+    const notificationmessage = `New shop registration from ${shopName} is awaiting approval`;
+    const notificationtype = 'shop_registration';
+    const notificationtime = new Date().toISOString();
 
     await pool.query(
       `INSERT INTO notifications (
@@ -555,7 +555,7 @@ app.post('/registerShop', verifyToken, upload.single('logo'), async (req, res) =
         created_at,
         is_read
       ) VALUES ($1, $2, $3, $4, $5)`,
-      [adminId, notificationMessage, notificationType, notificationTime, false]
+      [adminid, notificationmessage, notificationtype, notificationtime, false]
     );
 
     // Update the user's profile to mark shop as registered
@@ -566,7 +566,7 @@ app.post('/registerShop', verifyToken, upload.single('logo'), async (req, res) =
 
     res.status(201).json({
       message: 'Shop registration submitted successfully. Awaiting admin approval.',
-      shopId: shopId
+      shopid: shopid
     });
   } catch (err) {
     console.error('Error registering shop:', err.message);
@@ -586,13 +586,13 @@ app.get('/shops', async (req, res) => {
 });
 
 // Endpoint to get shop details
-app.get('/shops/:ownerId', async (req, res) => {
-  const { ownerId } = req.params;
+app.get('/shops/:ownerid', async (req, res) => {
+  const { ownerid } = req.params;
   
   try {
     const result = await pool.query(
       'SELECT * FROM shops WHERE ownerid = $1',
-      [ownerId]
+      [ownerid]
     );
 
     if (result.rows.length === 0) {
@@ -607,15 +607,15 @@ app.get('/shops/:ownerId', async (req, res) => {
 });
 
 // Endpoint to update a shop
-app.put('/shops/:shopId', verifyToken, async (req, res) => {
-  const { shopId } = req.params;
+app.put('/shops/:shopid', verifyToken, async (req, res) => {
+  const { shopid } = req.params;
   const updates = req.body;
 
   try {
     // Check if shop exists and user has permission
     const shopResult = await pool.query(
       'SELECT ownerid FROM shops WHERE shopid = $1',
-      [shopId]
+      [shopid]
     );
 
     if (shopResult.rows.length === 0) {
@@ -657,7 +657,7 @@ app.put('/shops/:shopId', verifyToken, async (req, res) => {
     }
     
     // Add shopId to values
-    values.push(shopId);
+    values.push(shopid);
     
     // Construct and execute the update query
     const query = `UPDATE shops SET ${fieldsToUpdate.join(', ')} WHERE shopid = $${paramIndex}`;
@@ -683,9 +683,9 @@ app.put('/shops/:shopId', verifyToken, async (req, res) => {
 });
 
 // Endpoint for admin to approve/reject a shop
-app.put('/approveShop/:shopId', verifyToken, async (req, res) => {
-  const { shopId } = req.params;
-  const { isApproved, rejectionReason } = req.body;
+app.put('/approveShop/:shopid', verifyToken, async (req, res) => {
+  const { shopid } = req.params;
+  const { isapproved, rejectionreason } = req.body;
 
   // Check if user is admin
   if (req.user.usertype !== 'admin') {
@@ -696,7 +696,7 @@ app.put('/approveShop/:shopId', verifyToken, async (req, res) => {
     // Get shop information
     const shopResult = await pool.query(
       'SELECT ownerid, shopname FROM shops WHERE shopid = $1',
-      [shopId]
+      [shopid]
     );
 
     if (shopResult.rows.length === 0) {
@@ -708,14 +708,14 @@ app.put('/approveShop/:shopId', verifyToken, async (req, res) => {
     // Update shop approval status
     await pool.query(
       'UPDATE shops SET isapproved = $1, rejectionreason = $2 WHERE shopid = $3',
-      [isApproved, rejectionReason || null, shopId]
+      [isapproved, rejectionreason || null, shopid]
     );
 
     // Create notification for the shop owner
-    const notificationType = isApproved ? 'shop_approved' : 'shop_rejected';
-    const notificationMessage = isApproved
+    const notificationType = isapproved ? 'shop_approved' : 'shop_rejected';
+    const notificationMessage = isapproved
       ? `Your shop ${shop.shopname} has been approved!`
-      : `Your shop ${shop.shopname} registration was not approved. Reason: ${rejectionReason}`;
+      : `Your shop ${shop.shopname} registration was not approved. Reason: ${rejectionreason}`;
 
     await pool.query(
       `INSERT INTO notifications (owner_id, message, notification_type, created_at, is_read)
@@ -724,13 +724,15 @@ app.put('/approveShop/:shopId', verifyToken, async (req, res) => {
     );
 
     res.status(200).json({
-      message: isApproved ? 'Shop approved successfully' : 'Shop rejected successfully'
+      message: isapproved ? 'Shop approved successfully' : 'Shop rejected successfully'
     });
   } catch (err) {
     console.error('Error updating shop approval:', err.message);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+//continue from this point
 
 // Endpoint to create a new kota
 app.post('/createKota', async (req, res) => {
